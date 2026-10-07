@@ -1,3 +1,5 @@
+package cardsnake.sim;
+
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.Arrays;
@@ -61,11 +63,11 @@ public class ArmisSnakeTest {
     }
 
     /** Frame: state, score, hi, len, then 2-bit cells. */
-    static final class Frame {
-        int state, score, hi, len;
-        int[] cells = new int[256];
+    public static final class Frame {
+        public int state, score, hi, len;
+        public int[] cells = new int[256];
 
-        Frame(byte[] f) {
+        public Frame(byte[] f) {
             ArmisHarness.expect(71, f.length, "frame length");
             state = f[0];
             score = ((f[1] & 0xFF) << 8) | (f[2] & 0xFF);
@@ -95,7 +97,7 @@ public class ArmisSnakeTest {
     }
 
     /** Plays greedily towards the food until the game ends; returns the last frame. */
-    static Frame playToEnd(ArmisHarness h) {
+    public static Frame playToEnd(ArmisHarness h) {
         Frame f = cmd(h, 0x20, 0);
         for (int n = 0; n < 5000 && f.state == 1; n++) {
             int head = f.find(2), food = f.find(3);

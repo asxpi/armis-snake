@@ -1,3 +1,5 @@
+package cardsnake.sim;
+
 import cardsnake.ArmisSnake;
 import com.licel.jcardsim.base.Simulator;
 import com.licel.jcardsim.base.SimulatorRuntime;
@@ -38,9 +40,9 @@ import org.globalplatform.Personalization;
  * CA X.509 certificate. SM MACs are zero, as in the ARMIS reference code.
  */
 public class ArmisHarness {
-    static final byte[] MANAGER_AID = hex("4D616E61676572417070");
-    static final byte[] SNAKE_AID = hex("F0534E414B454101");
-    static final int SW_OK = 0x9000;
+    public static final byte[] MANAGER_AID = hex("4D616E61676572417070");
+    public static final byte[] SNAKE_AID = hex("F0534E414B454101");
+    public static final int SW_OK = 0x9000;
     static final int POINT_LEN = 97, FIELD_LEN = 48;
 
     /** Exposes installed applets so STORE DATA can reach processData(). */
@@ -54,15 +56,25 @@ public class ArmisHarness {
 
     final Runtime rt = new Runtime();
     final Simulator sim = new Simulator(rt);
-    final KeyPair issuer = generate();
-    ECPublicKey managerKey;
+    final KeyPair issuer;
+    /** The Manager applet's card key; ARMIS CA certifies it in production. */
+    public ECPublicKey managerKey;
     byte[] sessionKey;
     int sequence;
+
+    public ArmisHarness() {
+        this(generate());
+    }
+
+    /** issuer: the issuer service's key pair; only its public half goes to the card. */
+    public ArmisHarness(KeyPair issuer) {
+        this.issuer = issuer;
+    }
 
     // --- ARMIS ---
 
     /** armis-cli deploy-manager: install, set curve, generate card key, store certificate. */
-    void deployManager() throws GeneralSecurityException {
+    public void deployManager() throws GeneralSecurityException {
         sim.installApplet(AIDUtil.create(MANAGER_AID), ManagerApplet.class, lv(MANAGER_AID), (short) 0,
                 (byte) (MANAGER_AID.length + 1));
 
@@ -84,14 +96,14 @@ public class ArmisHarness {
     }
 
     /** armis-cli deploy-client, first half: install with the Manager AID and the issuer key hash. */
-    void install() throws GeneralSecurityException {
+    public void install() throws GeneralSecurityException {
         byte[] hash = MessageDigest.getInstance("SHA-384").digest(issuerPoint(issuer));
         byte[] params = concat(lv(SNAKE_AID), lv(new byte[] {0}), lv(concat(lv(MANAGER_AID), lv(hash))));
         sim.installApplet(AIDUtil.create(SNAKE_AID), ArmisSnake.class, params, (short) 0, (byte) params.length);
     }
 
     /** Second half: STORE DATA with the issuer public key; returns the SW. */
-    int finalizeInstall(KeyPair key) {
+    public int finalizeInstall(KeyPair key) {
         return sw(storeData(SNAKE_AID, 0x80, issuerPoint(key)));
     }
 
@@ -198,12 +210,12 @@ public class ArmisHarness {
     // --- Transport ---
 
     /** Plain APDU to the card; returns data + SW. */
-    byte[] apdu(String hex) {
+    public byte[] apdu(String hex) {
         return sim.transmitCommand(hex(hex));
     }
 
     /** GP STORE DATA (80 E2) delivered to the applet's Personalization.processData(); returns data + SW. */
-    byte[] storeData(byte[] aid, int p1, byte[] data) {
+    public byte[] storeData(byte[] aid, int p1, byte[] data) {
         byte[] apdu = new byte[261];
         byte[] header = {(byte) 0x80, (byte) 0xE2, (byte) p1, (byte) sequence++, (byte) data.length};
         System.arraycopy(header, 0, apdu, 0, 5);
@@ -217,16 +229,16 @@ public class ArmisHarness {
         }
     }
 
-    static int sw(byte[] r) {
+    public static int sw(byte[] r) {
         return ((r[r.length - 2] & 0xFF) << 8) | (r[r.length - 1] & 0xFF);
     }
 
-    static byte[] ok(byte[] r) {
+    public static byte[] ok(byte[] r) {
         expect(SW_OK, sw(r), "SW");
         return Arrays.copyOf(r, r.length - 2);
     }
 
-    static void expect(Object want, Object got, String what) {
+    public static void expect(Object want, Object got, String what) {
         if (!want.equals(got)) {
             String fmt = want instanceof Integer && (Integer) want > 0xFF ? "%04X" : "%s";
             throw new AssertionError(what + ": expected " + String.format(fmt, want) + ", got " + String.format(fmt, got));
@@ -286,7 +298,7 @@ public class ArmisHarness {
         return Arrays.copyOf(data, i);
     }
 
-    static KeyPair generate() {
+    public static KeyPair generate() {
         try {
             KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
             g.initialize(new ECGenParameterSpec("secp384r1"));

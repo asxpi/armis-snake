@@ -76,7 +76,7 @@
     <mkdir dir="build/test"/>
     <javac srcdir="src:test:build/test-src/armis" destdir="build/test" includeantruntime="false" encoding="UTF-8"
            release="11" debug="true" classpath="${jcardsim.jar}:${gp.api}/gpapi-globalplatform.jar"/>
-    <java classname="ArmisSnakeTest" fork="true" failonerror="true"
+    <java classname="cardsnake.sim.ArmisSnakeTest" fork="true" failonerror="true"
           classpath="build/test:${jcardsim.jar}:${gp.api}/gpapi-globalplatform.jar">
       <env key="JCARDSIM_OBJECT_DELETION_SUPPORTED" value="1"/>
     </java>
