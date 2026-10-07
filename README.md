@@ -34,6 +34,24 @@ unzip -p build/armis-snake.cap 'cardsnake/javacard/*.cap' | sha256sum
 # 8aa0360ac9c293863cd5bdd871e73c2b5ea134f9a7e6ceef469c2ad2117860b0
 ```
 
+## Play
+
+`client/snake.py` is a terminal client: arrows/WASD, `p` pause, `r` restart, `q` quit.
+
+```sh
+nix develop
+ant test-classes
+python3 client/snake.py --name Mari     # jCardSim card, ARMIS lifecycle run by the test harness
+python3 client/snake.py --eid 0         # same, name read from the ID card in PC/SC reader 0
+python3 client/snake.py --pcsc 0        # real card with ArmisSnake installed
+```
+
+In jCardSim the harness also plays the issuer; on quit it reads the high score
+over secure messaging, as the issuer service would.
+
+To build your own UI, see [docs/API.md](docs/API.md): commands, frame format,
+game rules and the leaderboard endpoint.
+
 ## Applet
 
 | | |

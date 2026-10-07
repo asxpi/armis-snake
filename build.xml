@@ -64,7 +64,7 @@
 
   <!-- jCardSim rejects getInstance(..., externalAccess=true), so tests compile a
        copy of the ARMIS sources with it set to false. The CAP uses the originals. -->
-  <target name="test" depends="tools" description="Run the lifecycle and game tests in jCardSim">
+  <target name="test-classes" depends="tools" description="Compile the applet and jCardSim harness for client/snake.py">
     <fetch name="jcardsim"/>
     <copy todir="build/test-src/armis">
       <fileset dir="${armis}/util-lib/src/main/java"/>
@@ -76,6 +76,9 @@
     <mkdir dir="build/test"/>
     <javac srcdir="src:test:build/test-src/armis" destdir="build/test" includeantruntime="false" encoding="UTF-8"
            release="11" debug="true" classpath="${jcardsim.jar}:${gp.api}/gpapi-globalplatform.jar"/>
+  </target>
+
+  <target name="test" depends="test-classes" description="Run the lifecycle and game tests in jCardSim">
     <java classname="cardsnake.sim.ArmisSnakeTest" fork="true" failonerror="true"
           classpath="build/test:${jcardsim.jar}:${gp.api}/gpapi-globalplatform.jar">
       <env key="JCARDSIM_OBJECT_DELETION_SUPPORTED" value="1"/>

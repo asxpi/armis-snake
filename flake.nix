@@ -38,7 +38,7 @@
 
       devShells.x86_64-linux = {
         default = pkgs.mkShell {
-          packages = [ jdk pkgs.ant ];
+          packages = [ jdk pkgs.ant (pkgs.python3.withPackages (p: [ p.pyscard ])) ];
           JAVA_HOME = jdk.home;
         };
         # Issuer service: Spring Boot 3 needs JDK 17
