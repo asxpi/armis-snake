@@ -1,6 +1,5 @@
 package cardsnake.issuer;
 
-import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.x500.RDN;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x500.style.BCStyle;
@@ -9,39 +8,47 @@ import org.bouncycastle.asn1.x500.style.IETFUtils;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.ECPublicKey;
 import java.util.HexFormat;
 import java.util.Locale;
 
 /**
- * A player as identified by the ARMIS card holder certificate.
+ * A player registered at install. Only what score checks need is kept: the
+ * card holder certificate itself, with the personal code, is not.
  *
- * @param id   SHA-256 of the certificate subject serial number (personal code), so the
- *             service never keeps the personal code itself
- * @param name given name from the certificate, fitted to the applet's 16-byte limit
+ * @param id          random id the issuer puts on the card; the card signs it with every score
+ * @param name        given name from the certificate, fitted to the applet's 16-byte limit
+ * @param cardKey     the card's ARMIS key from the certificate, which verifies signed scores
+ * @param certificate SHA-256 of the certificate, to find the player when ARMIS reports removal
  */
-public record Player(String id, String name) {
+public record Player(String id, String name, ECPublicKey cardKey, String certificate) {
 
+    static final int ID_LENGTH = 16;
     static final int NAME_MAX = 16;
     static final String DEFAULT_NAME = "Player";
 
-    public static Player of(X509Certificate certificate) {
+    public static Player of(X509Certificate certificate, SecureRandom random) {
+        byte[] id = new byte[ID_LENGTH];
+        random.nextBytes(id);
         X500Name subject = X500Name.getInstance(certificate.getSubjectX500Principal().getEncoded());
-        String serial = attribute(subject, BCStyle.SERIALNUMBER);
-        byte[] idSource;
-        try {
-            idSource = serial != null ? serial.getBytes(StandardCharsets.UTF_8) : certificate.getEncoded();
-        } catch (CertificateEncodingException e) {
-            throw new IllegalArgumentException("Bad card holder certificate", e);
-        }
-        String givenName = attribute(subject, BCStyle.GIVENNAME);
-        return new Player(sha256(idSource), fit(givenName != null ? titleCase(givenName) : DEFAULT_NAME));
+        RDN[] givenName = subject.getRDNs(BCStyle.GIVENNAME);
+        String name = givenName.length == 0 ? DEFAULT_NAME : titleCase(IETFUtils.valueToString(givenName[0].getFirst().getValue()));
+        return new Player(HexFormat.of().formatHex(id), fit(name), (ECPublicKey) certificate.getPublicKey(), fingerprint(certificate));
     }
 
-    private static String attribute(X500Name subject, ASN1ObjectIdentifier type) {
-        RDN[] rdns = subject.getRDNs(type);
-        return rdns.length == 0 ? null : IETFUtils.valueToString(rdns[0].getFirst().getValue());
+    public byte[] idBytes() {
+        return HexFormat.of().parseHex(id);
+    }
+
+    static String fingerprint(X509Certificate certificate) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(certificate.getEncoded()));
+        } catch (NoSuchAlgorithmException | CertificateEncodingException e) {
+            throw new IllegalArgumentException("Bad card holder certificate", e);
+        }
     }
 
     /** "MARI-LIIS" -> "Mari-Liis": ID cards store names in capitals. */
@@ -69,13 +76,5 @@ public record Player(String id, String name) {
             end += Character.charCount(cp);
         }
         return s.substring(0, end);
-    }
-
-    private static String sha256(byte[] data) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(data));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
     }
 }

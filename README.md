@@ -1,22 +1,24 @@
 # armis-snake
 
 Snake as an [ARMIS](https://github.com/open-eid/armis-applet-ecosystem) client
-applet for Estonian ID cards. The game runs entirely on the card; a host only
-sends key presses and draws the returned board. The issuer is a leaderboard
-service: since the score is computed on the card, a score read through ARMIS
-was really played on that card.
+applet for Estonian ID cards. This is Snake, because Doom doesn't fit.
+
+The game runs entirely on the card; a host only sends key presses and draws the
+returned board. When a game is over, the card signs its high score with its
+ARMIS card key, so any UI can relay the score to the leaderboard and the
+leaderboard can check that it was played on that card.
 
 ## Build and verify
 
 ```sh
-git clone --recursive <this repo> && cd armis-snake
+git clone --recursive https://github.com/asxpi/armis-snake.git && cd armis-snake
 nix build            # builds and tests in a sandbox; result/armis-snake.cap, result/SHA256SUMS
 ```
 
 Expected for this revision:
 
 ```
-1d734df0a6bd2122707b28c5cdc4e34b93f781d8bf423a3167823e4cb066c64d  armis-snake.cap
+3f5dcd9785c7696996dd60ea0f4030a5b4b172f975022cf71623e053946cb8f3  armis-snake.cap
 ```
 
 The build is pinned end to end: nixpkgs (JDK 11, Ant) by `flake.lock`, the ARMIS
@@ -31,7 +33,7 @@ the card should still match:
 
 ```sh
 unzip -p build/armis-snake.cap 'cardsnake/javacard/*.cap' | sha256sum
-# 8aa0360ac9c293863cd5bdd871e73c2b5ea134f9a7e6ceef469c2ad2117860b0
+# 2a1e4c4fef471494d95ebc85b9d044ce8274afab92a440ea63adc52cc02fe298
 ```
 
 ## Play
@@ -43,14 +45,14 @@ nix develop
 ant test-classes
 python3 client/snake.py --name Mari     # jCardSim card, ARMIS lifecycle run by the test harness
 python3 client/snake.py --eid 0         # same, name read from the ID card in PC/SC reader 0
-python3 client/snake.py --pcsc 0        # real card with ArmisSnake installed
+python3 client/snake.py --pcsc 0 --leaderboard https://…/v1   # real card, submit the score on quit
 ```
 
-In jCardSim the harness also plays the issuer; on quit it reads the high score
-over secure messaging, as the issuer service would.
+In jCardSim, quitting shows the card-signed high score after checking the
+signature with the card key, as the leaderboard would.
 
 To build your own UI, see [docs/API.md](docs/API.md): commands, frame format,
-game rules and the leaderboard endpoint.
+game rules, score submission and the leaderboard.
 
 ## Applet
 
@@ -58,14 +60,14 @@ game rules and the leaderboard endpoint.
 |---|---|
 | Platform | Java Card 3.0.4 Classic, GlobalPlatform 2.2.1 (`Personalization`) |
 | Package / applet AID | `F0534E414B4541` / `F0534E414B454101` (proprietary, open to reassignment) |
-| Imports | ARMIS ecosystem library `41524D49532D6C6962` 0.0, javacard.framework, javacard.security, javacardx.crypto, org.globalplatform |
-| Load file | 2926 bytes of components (CAP 19452 bytes) |
-| Persistent | high score (2 B), player name (≤ 16 B), issuer public key (ARMIS library) |
+| Imports | ARMIS ecosystem library `41524D49532D6C6962` version 0.0, javacard.framework, javacard.security, javacardx.crypto, org.globalplatform |
+| Load file | 3288 bytes of components (CAP 21053 bytes) |
+| Persistent | high score (2 B), player name (≤ 16 B), player id (16 B), issuer public key (ARMIS library) |
 | Transient, deselect | 527 B game state (board, snake, counters, RNG byte) |
 | Transient, reset | 80 B KDF buffer, AES-256 session key, 1 flag |
 
 Sources: `src/cardsnake/SnakeGame.java` (rules, frame encoding) and
-`src/cardsnake/ArmisSnake.java` (ARMIS integration).
+`src/cardsnake/ArmisSnake.java` (ARMIS integration, score signing).
 
 ### Cardholder interface (plain APDUs)
 
@@ -74,12 +76,18 @@ Sources: `src/cardsnake/SnakeGame.java` (rules, frame encoding) and
 | New game | `80 20 00 00 47` | frame |
 | Move | `80 10 <dir> 00 47` | frame |
 | Player name | `80 30 00 00 00` (contact only) | UTF-8 name |
+| Sign score | `80 40 00 00 20 <nonce> 00` (contact only) | player id, high score, signature |
 
 `dir`: 0 keep, 1 up, 2 right, 3 down, 4 left. Frame (71 bytes): state
-(0 init, 1 playing, 2 dead, 3 won), score, high score, length (u16 each), then
-the 16×16 board at 2 bits per cell (0 empty, 1 body, 2 head, 3 food).
+(1 playing, 2 dead, 3 won), score, high score, length (u16 each), then the
+16×16 board at 2 bits per cell. Full description in [docs/API.md](docs/API.md).
 
-### Issuer interface (STORE DATA via ARMIS)
+Sign score asks the Manager applet, through the ARMIS `forSigning` SIO, to sign
+`"armis-snake score" || player id || nonce || high score` with ECDSA-SHA384 and
+the card key. The fixed prefix keeps the card key from signing host-chosen data
+that could mean something else, such as an ECDHE ephemeral key.
+
+### Issuer interface (STORE DATA via ARMIS, once at install)
 
 1. Install parameters: Manager AID and SHA-384 of the issuer's P-384 public
    key; the applet registers with the Manager applet.
@@ -88,15 +96,19 @@ the 16×16 board at 2 bits per cell (0 empty, 1 body, 2 head, 3 food).
    issuer. The applet verifies it, runs ECDHE through the Manager's card key and
    returns its ephemeral key signed by the Manager. Both sides derive AES-256
    with ConcatKDF(SHA-384), as in `armis-test-client-issuer-service`.
-4. Over secure messaging: PUT DATA `5F20` sets the player name, GET DATA `DF01`
-   returns the high score.
+4. Over secure messaging: PUT DATA `5F20` sets the player name, PUT DATA `DF02`
+   sets the 16-byte player id the card signs with every score.
+
+ARMIS personalizes an applet only at install, so scores reach the leaderboard
+through Sign score instead.
 
 ## Issuer service
 
-[`issuer/`](issuer) is the leaderboard service the ARMIS server calls to
-personalize the applet: it sets the player name from the card holder
-certificate and records the high score read from the card. It is a fork of
-RIA's test issuer service with the same REST API.
+[`issuer/`](issuer) is the leaderboard service. ARMIS calls it at install to
+personalize the applet; it takes the player name and the card key from the
+card holder certificate and assigns a player id. UIs then submit scores signed
+by the card. It is a fork of RIA's test issuer service with the same ARMIS
+REST API.
 
 ## Testing on a real card
 
@@ -104,8 +116,9 @@ Until RIA provides test cards, a blank Java Card 3.0.4+ / GlobalPlatform 2.2.1
 card with P-384 ECDH and ECDSA, AES-256 and object deletion (e.g. NXP JCOP 4
 J3R180) can run the real ARMIS tooling, with keys you control. Untested so far.
 
-1. Get [`armis-cli.jar`](https://github.com/open-eid/armis-cli/releases) (v0.11.0)
-   and its prebuilt ARMIS library and Manager CAPs (`prebuilt/applets/`).
+1. Get [`armis-cli.jar`](https://github.com/open-eid/armis-cli/releases) v0.11.0,
+   and the ARMIS library and Manager CAPs from `prebuilt/applets/` in the
+   armis-cli repository.
 2. Set up a security domain armis-cli can open (`--armis.sd-aid`, `--armis.sd-key`,
    `--armis.sd-key-diversification`), e.g. with
    [GlobalPlatformPro](https://github.com/martinpaljak/GlobalPlatformPro), and an
@@ -116,21 +129,26 @@ J3R180) can run the real ARMIS tooling, with keys you control. Untested so far.
    --armis.client-aid=F0534E414B454101 --armis.client-instance-aid=F0534E414B454101
    --armis.issuer-url=http://localhost:8080/v1`. Use `sign` first if the card
    requires DAP.
-5. Play over PC/SC with the applet AID `F0534E414B454101`, then run `deploy-client`
-   again or another personalization to see the score on `GET /v1/leaderboard`.
+5. Play with `client/snake.py --pcsc 0 --leaderboard http://localhost:8080/v1`
+   and check `GET /v1/leaderboard`.
 
 ## Security and privacy
 
 - No access to eID data: the applet lives in the ARMIS SSD and cannot reach the
-  eID application. It stores only what the issuer sets and the high score.
+  eID application, and score signing uses the ARMIS card key, not the eID keys,
+  so no PIN is involved.
 - No private keys of its own: ECDHE and signing go through the Manager's SIO.
 - Nothing identifying over contactless: the frame holds no unique data, and the
-  player name is refused unless the contact interface is used.
+  player name and Sign score are refused unless the contact interface is used.
 - Selecting the applet ends any issuer session; issuer commands are reachable
   only through STORE DATA, never as plain APDUs.
+- A score cannot be changed or replayed by the host: it is computed on the card,
+  signed together with a single-use leaderboard nonce, and checked against the
+  card key from the certificate. A bot can still play on a real card.
 - Food placement uses `RandomData.ALG_SECURE_RANDOM`.
-- The issuer service keeps only a hash of the personal code, the given name and
-  the high score, and drops them when ARMIS reports the applet removed.
+- The issuer service keeps the player name, the card public key, a hash of the
+  certificate and the best score, not the certificate or personal code, and
+  drops them when ARMIS reports the applet removed.
 - Inherited from the ARMIS library: SM MACs are not computed yet (zero bytes,
   marked TODO upstream), so SM gives confidentiality but not integrity.
 
@@ -138,16 +156,19 @@ J3R180) can run the real ARMIS tooling, with keys you control. Untested so far.
 
 `ant test` (also run by `nix build`) plays both off-card roles in jCardSim:
 ARMIS (Manager personalization, install, STORE DATA) and the issuer (signed
-ECDHE, SM). It covers the lifecycle, game rules, the issuer reading a played
-score, and rejection of a wrong issuer key at install, a wrongly signed
-INTERNAL AUTHENTICATE, SM without a session, SM after reselection, oversized
-names and unknown commands.
+ECDHE, SM). It covers the lifecycle, game rules, signed scores and their
+rejection when the score, player id, nonce or card key differ, and rejection of
+a wrong issuer key at install, a wrongly signed INTERNAL AUTHENTICATE, SM
+without a session, SM after reselection, signing before personalization or with
+a bad nonce, oversized names and unknown commands. The issuer service has its
+own tests; see [issuer/README.md](issuer/README.md).
 
 Simulator differences from a card, all in `test/`: STORE DATA calls
 `processData()` directly rather than through a security domain; the Manager
-certificate is a DER stand-in with its raw public key; and the ARMIS sources are
-compiled with `externalAccess=false`, which jCardSim requires. The CAP is built
-from the unmodified sources.
+certificate is a DER stand-in with its raw public key; jCardSim generates the
+same key pair on every simulated card; and the ARMIS sources are compiled with
+`externalAccess=false`, which jCardSim requires. The CAP is built from the
+unmodified sources.
 
 ## License
 

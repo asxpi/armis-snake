@@ -9,6 +9,7 @@ import org.bouncycastle.asn1.x500.style.BCStyle;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -81,6 +82,8 @@ class SnakeIssuerTest {
     ObjectMapper json;
     @Autowired
     Leaderboard leaderboard;
+    @Autowired
+    Players players;
 
     ArmisHarness card;
     X509Certificate holder;
@@ -92,35 +95,70 @@ class SnakeIssuerTest {
         // ARMIS CA certifies the Manager's card key; the subject carries the holder's identity
         holder = certificate("C=EE,SERIALNUMBER=PNOEE-38001085718,GIVENNAME=MARI-LIIS,SURNAME=TAMM,"
                 + "CN=TAMM\\,MARI-LIIS\\,38001085718", card.managerKey, "CN=Test ARMIS CA", ARMIS_CA.getPrivate());
-        leaderboard.remove(Player.of(holder));
+    }
+
+    @AfterEach
+    void forgetPlayer() {
+        players.removeByCertificate(Player.fingerprint(holder)).ifPresent(leaderboard::remove);
     }
 
     @Test
-    void personalizesNameAndRecordsScore() throws Exception {
-        personalize(true);
+    void personalizesNameAndPlayerId() throws Exception {
+        personalize();
         ArmisHarness.ok(card.apdu(SELECT));
         assertEquals("Mari-Liis", new String(ArmisHarness.ok(card.apdu("8030000000")), StandardCharsets.UTF_8));
-        assertEquals("[{\"name\":\"Mari-Liis\",\"score\":0}]", leaderboardJson());
+        // The card got a player id, so it signs; nothing is on the leaderboard yet
+        ArmisHarness.ok(card.signScore(new byte[32]));
+        assertEquals("[]", leaderboardJson());
     }
 
     @Test
-    void nextPersonalizationReadsPlayedScore() throws Exception {
-        personalize(true);
+    void acceptsSignedScore() throws Exception {
+        personalize();
         ArmisHarness.ok(card.apdu(SELECT));
         ArmisSnakeTest.Frame end = ArmisSnakeTest.playToEnd(card);
         assertTrue(end.hi > 0, "player scored");
 
-        personalize(false);
+        byte[] nonce = challenge();
+        assertEquals(200, submit(nonce, ArmisHarness.ok(card.signScore(nonce))));
         assertEquals("[{\"name\":\"Mari-Liis\",\"score\":" + end.hi + "}]", leaderboardJson());
     }
 
     @Test
+    void rejectsReplayTamperingAndUnknownNonces() throws Exception {
+        personalize();
+        ArmisHarness.ok(card.apdu(SELECT));
+        byte[] nonce = challenge();
+        byte[] signed = ArmisHarness.ok(card.signScore(nonce));
+        assertEquals(200, submit(nonce, signed));
+        assertEquals(403, submit(nonce, signed), "replayed nonce");
+
+        byte[] fresh = challenge();
+        assertEquals(403, submit(fresh, signed), "signature over another nonce");
+
+        nonce = challenge();
+        signed = ArmisHarness.ok(card.signScore(nonce));
+        signed[17] = (byte) 0xFF;  // claim a higher score
+        assertEquals(403, submit(nonce, signed), "tampered score");
+
+        byte[] unknown = new byte[32];
+        assertEquals(403, submit(unknown, ArmisHarness.ok(card.signScore(unknown))), "nonce not issued");
+        assertEquals("[{\"name\":\"Mari-Liis\",\"score\":0}]", leaderboardJson());
+    }
+
+    @Test
     void removedDropsPlayer() throws Exception {
-        personalize(true);
+        personalize();
+        ArmisHarness.ok(card.apdu(SELECT));
+        byte[] nonce = challenge();
+        assertEquals(200, submit(nonce, ArmisHarness.ok(card.signScore(nonce))));
+
         String body = json.writeValueAsString(Map.of(
                 "cardHolderCertificate", b64(holder.getEncoded()), "eventType", "UNINSTALLED_BY_USER"));
         assertEquals(204, call("/v1/personalization/removed", body).getResponse().getStatus());
         assertEquals("[]", leaderboardJson());
+        nonce = challenge();
+        assertEquals(403, submit(nonce, ArmisHarness.ok(card.signScore(nonce))), "removed player");
     }
 
     @Test
@@ -128,21 +166,20 @@ class SnakeIssuerTest {
         assertEquals("Mari-Liis", Player.titleCase("MARI-LIIS"));
         assertEquals("Jaan Peeter", Player.titleCase("JAAN PEETER"));
         assertEquals("Ülle-Õnne Mäe", Player.fit("Ülle-Õnne Mäesalu"));
-        Player p = Player.of(holder);
+        Player p = Player.of(holder, new java.security.SecureRandom());
         assertEquals("Mari-Liis", p.name());
-        assertTrue(!p.id().contains("38001085718"), "personal code is hashed");
+        assertEquals(32, p.id().length());
+        assertTrue(!p.toString().contains("38001085718"), "no personal code kept");
     }
 
-    /** What the ARMIS server does: start, install and finalize once, then relay STORE DATA until done. */
-    void personalize(boolean install) throws Exception {
+    /** What the ARMIS server does at install: start, install and finalize, then relay STORE DATA until done. */
+    void personalize() throws Exception {
         JsonNode r = json.readTree(call("/v1/personalization/start", holderJson(null)).getResponse().getContentAsByteArray());
         X509Certificate issuerCert = (X509Certificate) CertificateFactory.getInstance("X.509")
                 .generateCertificate(new ByteArrayInputStream(r.get("issuerCertificate").binaryValue()));
         assertArrayEquals(ISSUER.getPublic().getEncoded(), issuerCert.getPublicKey().getEncoded());
-        if (install) {
-            card.install();
-            assertEquals(ArmisHarness.SW_OK, card.finalizeInstall(new KeyPair(issuerCert.getPublicKey(), null)));
-        }
+        card.install();
+        assertEquals(ArmisHarness.SW_OK, card.finalizeInstall(new KeyPair(issuerCert.getPublicKey(), null)));
 
         JsonNode command = r.get("storeDataCommand");
         while (command != null) {
@@ -169,6 +206,17 @@ class SnakeIssuerTest {
         int status = result.getResponse().getStatus();
         assertTrue(status == 200 || status == 204, path + " returned " + status);
         return result;
+    }
+
+    byte[] challenge() throws Exception {
+        String body = mvc.perform(get("/v1/challenge")).andReturn().getResponse().getContentAsString();
+        return json.readTree(body).get("nonce").binaryValue();
+    }
+
+    int submit(byte[] nonce, byte[] signedScore) throws Exception {
+        String body = json.writeValueAsString(Map.of("nonce", b64(nonce), "signedScore", b64(signedScore)));
+        return mvc.perform(post("/v1/scores").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andReturn().getResponse().getStatus();
     }
 
     String leaderboardJson() throws Exception {

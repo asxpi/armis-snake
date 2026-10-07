@@ -2,9 +2,11 @@
 """Terminal client for ArmisSnake: the card runs the game, this only sends keys and draws.
 
 Plays against ArmisSnake in jCardSim (run `ant test-classes` first) or on a real
-card over PC/SC.
+card over PC/SC, and can submit the card-signed high score to a leaderboard.
 """
 import argparse
+import base64
+import json
 import os
 import select
 import subprocess
@@ -12,13 +14,15 @@ import sys
 import termios
 import time
 import tty
+import urllib.error
+import urllib.request
 from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GP_API = ROOT / "ext/armis-applet-ecosystem/ext/gp-exports/org.globalplatform-1.6/gpapi-globalplatform.jar"
 AID = bytes.fromhex("F0534E414B454101")
-INS_TICK, INS_NEW, INS_GET_NAME = 0x10, 0x20, 0x30
+INS_TICK, INS_NEW, INS_GET_NAME, INS_SIGN_SCORE = 0x10, 0x20, 0x30, 0x40
 FRAME_LEN = 71
 NAME_MAX = 16  # bytes, applet limit
 
@@ -92,6 +96,22 @@ def fit(name):
     return name.encode()[:NAME_MAX].decode(errors="ignore")
 
 
+def submit_score(card, url):
+    """Has the card sign its high score over a leaderboard nonce and submits it."""
+    with urllib.request.urlopen(f"{url}/challenge") as r:
+        nonce = base64.b64decode(json.load(r)["nonce"])
+    signed = send(card, bytes([0x80, INS_SIGN_SCORE, 0, 0, len(nonce)]) + nonce + b"\x00")
+    body = json.dumps({"nonce": base64.b64encode(nonce).decode(),
+                       "signedScore": base64.b64encode(signed).decode()}).encode()
+    request = urllib.request.Request(f"{url}/scores", body, {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request) as r:
+            entry = json.load(r)
+        return f"leaderboard accepted {entry['name']}: {entry['score']}"
+    except urllib.error.HTTPError as e:
+        return f"leaderboard rejected the score (HTTP {e.code})"
+
+
 def draw(frame, ms, player):
     state = frame[0]
     score, hi, length = (int.from_bytes(frame[i:i + 2], "big") for i in (1, 3, 5))
@@ -111,6 +131,8 @@ def main():
     ap.add_argument("--pcsc", type=int, metavar="N", help="play on the card in PC/SC reader N instead of jCardSim")
     ap.add_argument("--name", default="Player", help="player name the simulated issuer sets (default: Player)")
     ap.add_argument("--eid", type=int, metavar="N", help="take --name from the ID card in PC/SC reader N")
+    ap.add_argument("--leaderboard", metavar="URL",
+                    help="on quit, submit the signed high score, e.g. http://localhost:8080/v1")
     ap.add_argument("--tick", type=float, default=0.15, help="seconds per move (default 0.15)")
     args = ap.parse_args()
 
@@ -153,8 +175,10 @@ def main():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         sys.stdout.write("\x1b[0m\x1b[?25h\r\n")
-    if sim:
-        print(f"Issuer read the high score over ARMIS secure messaging: {card.request('#hiscore')}")
+    if args.leaderboard:
+        print(submit_score(card, args.leaderboard.rstrip("/")))
+    elif sim:
+        print(f"Card-signed high score, verified with the card key: {card.request('#hiscore')}")
 
 
 if __name__ == "__main__":

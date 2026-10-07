@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** High scores read from cards, one entry per player. In memory only. */
+/** Best verified score per player. In memory only. */
 @Component
 public class Leaderboard {
 
@@ -16,8 +16,8 @@ public class Leaderboard {
 
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
 
-    public void record(Player player, int score) {
-        entries.merge(player.id(), new Entry(player.name(), score),
+    public Entry record(Player player, int score) {
+        return entries.merge(player.id(), new Entry(player.name(), score),
                 (old, now) -> new Entry(now.name(), Math.max(old.score(), now.score())));
     }
 

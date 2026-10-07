@@ -24,6 +24,8 @@ public class PersonalizationService {
     @NonNull
     private final SecureRandom secureRandom;
     @NonNull
+    private final Players players;
+    @NonNull
     private final Leaderboard leaderboard;
 
     private final Cache<X509Certificate, PersonalizationSession> sessions = Caffeine.newBuilder()
@@ -31,7 +33,7 @@ public class PersonalizationService {
             .build();
 
     public Optional<StoreDataCommand> startPersonalization(X509Certificate cardHolderCertificate) {
-        PersonalizationSession session = new PersonalizationSession(secureMessagingKeyStore, secureRandom, cardHolderCertificate, leaderboard);
+        PersonalizationSession session = new PersonalizationSession(secureMessagingKeyStore, secureRandom, cardHolderCertificate, players, leaderboard);
         PersonalizationSession oldSession = sessions.asMap().put(cardHolderCertificate, session);
         // TODO If oldSession != null, wait for running request to finish.
         // Release resources on oldSession if necessary.
@@ -55,8 +57,8 @@ public class PersonalizationService {
 
     public void removedPersonalization(X509Certificate cardHolderCertificate, PersonalizationRemovedEventType eventType) {
         PersonalizationSession oldSession = sessions.asMap().remove(cardHolderCertificate);
-        // The applet is gone from the card, so is the player's entry
-        leaderboard.remove(Player.of(cardHolderCertificate));
+        // The applet is gone from the card, so is the player
+        players.removeByCertificate(Player.fingerprint(cardHolderCertificate)).ifPresent(leaderboard::remove);
         // TODO If oldSession != null, wait for running request to finish.
         // Release resources on oldSession if necessary.
     }

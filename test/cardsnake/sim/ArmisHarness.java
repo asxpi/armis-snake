@@ -37,7 +37,9 @@ import org.globalplatform.Personalization;
  * Differences from a real card: STORE DATA calls processData() directly
  * instead of going through a GlobalPlatform security domain, and the Manager
  * certificate is a DER stand-in holding its public key instead of an ARMIS
- * CA X.509 certificate. SM MACs are zero, as in the ARMIS reference code.
+ * CA X.509 certificate, and jCardSim's key generation is deterministic, so
+ * every simulated card has the same card key. SM MACs are zero, as in the
+ * ARMIS reference code.
  */
 public class ArmisHarness {
     public static final byte[] MANAGER_AID = hex("4D616E61676572417070");
@@ -153,16 +155,58 @@ public class ArmisHarness {
 
     /** PUT DATA 5F20 over SM; returns the SW (outer, or the protected one). */
     int putName(String name) throws GeneralSecurityException {
-        byte[] data = name.getBytes(StandardCharsets.UTF_8);
-        byte[] r = storeData(SNAKE_AID, 0x01, nested(0xDA, 0x5F, 0x20, wrap(0xDA, data, -1)));
+        return putData(0x5F20, name.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** PUT DATA DF02 over SM; returns the SW. */
+    int putPlayerId(byte[] id) throws GeneralSecurityException {
+        return putData(0xDF02, id);
+    }
+
+    int putData(int tag, byte[] data) throws GeneralSecurityException {
+        byte[] r = storeData(SNAKE_AID, 0x01, nested(0xDA, tag >> 8, tag & 0xFF, wrap(0xDA, data, -1)));
         return sw(r) != SW_OK ? sw(r) : unwrap(r).sw;
     }
 
-    /** GET DATA DF01 over SM. */
-    int hiScore() throws GeneralSecurityException {
-        Unwrapped u = unwrap(storeData(SNAKE_AID, 0x81, nested(0xCA, 0xDF, 0x01, wrap(0xCA, new byte[0], 0))));
-        expect(SW_OK, u.sw, "protected SW of GET DATA");
-        return ((u.data[0] & 0xFF) << 8) | (u.data[1] & 0xFF);
+    // --- Leaderboard ---
+
+    static final byte[] SCORE_CONTEXT = "armis-snake score".getBytes(StandardCharsets.US_ASCII);
+
+    /** Response of SIGN SCORE (80 40): player id, high score and the card-key signature. */
+    public static final class SignedScore {
+        public final byte[] playerId;
+        public final int score;
+        public final byte[] signature;
+
+        public SignedScore(byte[] response) {
+            playerId = Arrays.copyOf(response, 16);
+            score = ((response[16] & 0xFF) << 8) | (response[17] & 0xFF);
+            signature = Arrays.copyOfRange(response, 18, response.length);
+        }
+
+        /** What the leaderboard checks: the card key signed this id, nonce and score. */
+        public boolean verify(ECPublicKey cardKey, byte[] nonce) throws GeneralSecurityException {
+            Signature v = Signature.getInstance("SHA384withECDSA");
+            v.initVerify(cardKey);
+            v.update(concat(SCORE_CONTEXT, playerId, nonce, new byte[] {(byte) (score >> 8), (byte) score}));
+            return v.verify(signature);
+        }
+    }
+
+    /** SIGN SCORE as a host would send it; returns data + SW. */
+    public byte[] signScore(byte[] nonce) {
+        return sim.transmitCommand(concat(new byte[] {(byte) 0x80, 0x40, 0, 0, (byte) nonce.length}, nonce, new byte[] {0}));
+    }
+
+    /** Signs the high score with a fresh nonce and checks it with the Manager key; returns the score. */
+    public int verifiedScore() throws GeneralSecurityException {
+        byte[] nonce = new byte[32];
+        new java.security.SecureRandom().nextBytes(nonce);
+        SignedScore s = new SignedScore(ok(signScore(nonce)));
+        if (!s.verify(managerKey, nonce)) {
+            throw new AssertionError("score signature invalid");
+        }
+        return s.score;
     }
 
     /** ISO 7816-4 SM as in SecureMessagingChannel: AES-CBC, zero IV, ISO 9797-1 M2 padding, zero MAC. */
