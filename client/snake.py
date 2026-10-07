@@ -2,11 +2,9 @@
 """Terminal client for ArmisSnake: the card runs the game, this only sends keys and draws.
 
 Plays against ArmisSnake in jCardSim (run `ant test-classes` first) or on a real
-card over PC/SC, and can submit the card-signed high score to a leaderboard.
+card over PC/SC. The high score is kept on the card.
 """
 import argparse
-import base64
-import json
 import os
 import select
 import subprocess
@@ -14,17 +12,14 @@ import sys
 import termios
 import time
 import tty
-import urllib.error
-import urllib.request
 from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GP_API = ROOT / "ext/armis-applet-ecosystem/ext/gp-exports/org.globalplatform-1.6/gpapi-globalplatform.jar"
 AID = bytes.fromhex("F0534E414B454101")
-INS_TICK, INS_NEW, INS_GET_NAME, INS_SIGN_SCORE = 0x10, 0x20, 0x30, 0x40
+INS_TICK, INS_NEW = 0x10, 0x20
 FRAME_LEN = 71
-NAME_MAX = 16  # bytes, applet limit
 
 # Estonian ID card: (eID application AID, SELECT for the personal data DF), per chip generation
 EID_LAYOUTS = [
@@ -41,23 +36,20 @@ STATUS = {2: "GAME OVER  r: restart", 3: "YOU WIN  r: restart"}
 
 
 class Sim:
-    """ArmisSnake in jCardSim via cardsnake.sim.Bridge, personalized with name."""
+    """ArmisSnake installed through ARMIS in jCardSim, via cardsnake.sim.Bridge."""
 
-    def __init__(self, name):
+    def __init__(self):
         cp = os.pathsep.join(str(p) for p in (ROOT / "build/test", ROOT / "lib/jcardsim.jar", GP_API))
         if not (ROOT / "build/test/cardsnake/sim/Bridge.class").exists():
             sys.exit("run `ant test-classes` first")
-        self.p = subprocess.Popen(["java", "-cp", cp, "cardsnake.sim.Bridge", name],
+        self.p = subprocess.Popen(["java", "-cp", cp, "cardsnake.sim.Bridge"],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
                                   env={**os.environ, "JCARDSIM_OBJECT_DELETION_SUPPORTED": "1"})
 
-    def request(self, line):
-        self.p.stdin.write(line + "\n")
-        self.p.stdin.flush()
-        return self.p.stdout.readline().strip()
-
     def transmit(self, apdu):
-        return bytes.fromhex(self.request(apdu.hex()))
+        self.p.stdin.write(apdu.hex() + "\n")
+        self.p.stdin.flush()
+        return bytes.fromhex(self.p.stdout.readline().strip())
 
 
 class Pcsc:
@@ -91,27 +83,6 @@ def read_eid_name(index):
     sys.exit("no Estonian eID application on the card")
 
 
-def fit(name):
-    """Trims name to NAME_MAX UTF-8 bytes without splitting a character."""
-    return name.encode()[:NAME_MAX].decode(errors="ignore")
-
-
-def submit_score(card, url):
-    """Has the card sign its high score over a leaderboard nonce and submits it."""
-    with urllib.request.urlopen(f"{url}/challenge") as r:
-        nonce = base64.b64decode(json.load(r)["nonce"])
-    signed = send(card, bytes([0x80, INS_SIGN_SCORE, 0, 0, len(nonce)]) + nonce + b"\x00")
-    body = json.dumps({"nonce": base64.b64encode(nonce).decode(),
-                       "signedScore": base64.b64encode(signed).decode()}).encode()
-    request = urllib.request.Request(f"{url}/scores", body, {"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request) as r:
-            entry = json.load(r)
-        return f"leaderboard accepted {entry['name']}: {entry['score']}"
-    except urllib.error.HTTPError as e:
-        return f"leaderboard rejected the score (HTTP {e.code})"
-
-
 def draw(frame, ms, player):
     state = frame[0]
     score, hi, length = (int.from_bytes(frame[i:i + 2], "big") for i in (1, 3, 5))
@@ -120,7 +91,7 @@ def draw(frame, ms, player):
     for y in range(16):
         out.append("|" + "".join(CELL[c] for c in cells[y * 16:y * 16 + 16]) + "\x1b[0m|")
     out.append("+" + "-" * 32 + "+")
-    out.append(f" {player}  score {score:<4} hi {hi:<4} len {length:<3} card {ms:5.1f} ms\x1b[K")
+    out.append(f" {player + '  ' if player else ''}score {score:<4} hi {hi:<4} len {length:<3} card {ms:5.1f} ms\x1b[K")
     out.append(f" {STATUS.get(state, 'arrows/wasd  p: pause  q: quit')}\x1b[K")
     sys.stdout.write("\r\n".join(out))
     sys.stdout.flush()
@@ -129,20 +100,17 @@ def draw(frame, ms, player):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pcsc", type=int, metavar="N", help="play on the card in PC/SC reader N instead of jCardSim")
-    ap.add_argument("--name", default="Player", help="player name the simulated issuer sets (default: Player)")
-    ap.add_argument("--eid", type=int, metavar="N", help="take --name from the ID card in PC/SC reader N")
-    ap.add_argument("--leaderboard", metavar="URL",
-                    help="on quit, submit the signed high score, e.g. http://localhost:8080/v1")
+    ap.add_argument("--name", default="", help="player name to show")
+    ap.add_argument("--eid", type=int, metavar="N",
+                    help="show the given name from the ID card in PC/SC reader N (no PIN needed)")
     ap.add_argument("--tick", type=float, default=0.15, help="seconds per move (default 0.15)")
     args = ap.parse_args()
 
-    sim = args.pcsc is None
-    name = fit(read_eid_name(args.eid) if args.eid is not None else args.name)
-    card = Sim(name) if sim else Pcsc(args.pcsc)
+    player = read_eid_name(args.eid) if args.eid is not None else args.name
+    card = Sim() if args.pcsc is None else Pcsc(args.pcsc)
     r = card.transmit(bytes([0x00, 0xA4, 0x04, 0x00, len(AID)]) + AID)
     if r[-2:] != b"\x90\x00":
         sys.exit(f"ArmisSnake not found on the card (SW {r[-2:].hex().upper()})")
-    player = send(card, bytes([0x80, INS_GET_NAME, 0, 0, 0])).decode()
 
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
@@ -175,10 +143,6 @@ def main():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         sys.stdout.write("\x1b[0m\x1b[?25h\r\n")
-    if args.leaderboard:
-        print(submit_score(card, args.leaderboard.rstrip("/")))
-    elif sim:
-        print(f"Card-signed high score, verified with the card key: {card.request('#hiscore')}")
 
 
 if __name__ == "__main__":

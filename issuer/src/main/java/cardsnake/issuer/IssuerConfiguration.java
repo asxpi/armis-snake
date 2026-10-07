@@ -2,32 +2,28 @@ package cardsnake.issuer;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.DeserializationFeature;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
 
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
-import java.security.SecureRandom;
-import java.security.Security;
+import java.io.IOException;
+import java.io.InputStream;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 
 @Configuration
 public class IssuerConfiguration {
 
-    @PostConstruct
-    public void init() {
-        Security.addProvider(new BouncyCastleProvider());
-    }
-
-    @PreDestroy
-    public void cleanUp() {
-        Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME);
-    }
-
+    /** The issuer certificate returned to ARMIS; the private key is not needed. */
     @Bean
-    public SecureRandom secureRandom() {
-        return new SecureRandom();
+    public X509Certificate issuerCertificate(@Value("${issuer-service.certificate}") Resource certificate)
+            throws IOException, CertificateException {
+        try (InputStream in = certificate.getInputStream()) {
+            return (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(in);
+        }
     }
 
     @Bean
@@ -40,5 +36,4 @@ public class IssuerConfiguration {
                 // Cleaner output.
                 .serializationInclusion(JsonInclude.Include.NON_NULL);
     }
-
 }

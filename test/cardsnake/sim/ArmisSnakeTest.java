@@ -2,21 +2,16 @@ package cardsnake.sim;
 
 import java.io.OutputStream;
 import java.io.PrintStream;
-import java.security.interfaces.ECPublicKey;
 import java.util.Arrays;
 
 /**
- * Lifecycle, game and security tests for ArmisSnake in jCardSim.
+ * Install, game and rejection tests for ArmisSnake in jCardSim.
  * Exits non-zero on the first failure.
  */
 public class ArmisSnakeTest {
     static final String SELECT = "00A4040008F0534E414B454101";
-    static final int SW_CONDITIONS = 0x6985;
-    static final int SW_SECURITY = 0x6982, SW_WRONG_DATA = 0x6A80, SW_WRONG_LENGTH = 0x6700,
-            SW_INS = 0x6D00, SW_CLA = 0x6E00;
-
-    static final byte[] PLAYER_ID = ArmisHarness.hex("00112233445566778899AABBCCDDEEFF");
-    static final byte[] NONCE = ArmisHarness.hex("A5".repeat(32));
+    static final String SELECT_MANAGER = "00A404000A4D616E61676572417070";
+    static final int SW_WRONG_DATA = 0x6A80, SW_INS = 0x6D00, SW_CLA = 0x6E00;
 
     static int passed;
 
@@ -25,16 +20,11 @@ public class ArmisSnakeTest {
         // jCardSim prints debug lines to stdout
         System.setOut(new PrintStream(OutputStream.nullOutputStream()));
 
-        test(out, "lifecycle: install, finalize, authenticate, personalize", ArmisSnakeTest::lifecycle);
+        test(out, "install: register with the Manager, finalize with the issuer key", ArmisSnakeTest::install);
         test(out, "game: start, rules, death, high score", ArmisSnakeTest::game);
-        test(out, "signed score verifies with the card key", ArmisSnakeTest::signedScore);
-        test(out, "signed score rejects tampering and other nonces", ArmisSnakeTest::signedScoreTampering);
-        test(out, "refuses to sign before personalization or with a bad nonce", ArmisSnakeTest::signScoreRefusals);
+        test(out, "high score stays on the card; game state does not", ArmisSnakeTest::highScorePersists);
         test(out, "rejects install finalized with another key", ArmisSnakeTest::wrongIssuerKey);
-        test(out, "rejects INTERNAL AUTHENTICATE signed by another key", ArmisSnakeTest::wrongAuthSigner);
-        test(out, "rejects SM commands without a session", ArmisSnakeTest::noSession);
-        test(out, "selecting the applet ends the issuer session", ArmisSnakeTest::selectEndsSession);
-        test(out, "rejects names over 16 bytes", ArmisSnakeTest::longName);
+        test(out, "rejects STORE DATA after the install", ArmisSnakeTest::noPersonalization);
         test(out, "rejects unknown CLA and INS", ArmisSnakeTest::unknownCommands);
         out.println(passed + " tests passed");
     }
@@ -55,19 +45,17 @@ public class ArmisSnakeTest {
         }
     }
 
-    static ArmisHarness personalized(String name) throws Exception {
+    /** ArmisSnake installed through ARMIS and selected. */
+    static ArmisHarness installed() throws Exception {
         ArmisHarness h = new ArmisHarness();
         h.deploy();
-        ArmisHarness.expect(ArmisHarness.SW_OK, h.authenticate(h.issuer), "authenticate");
-        ArmisHarness.expect(ArmisHarness.SW_OK, h.putName(name), "put name");
-        ArmisHarness.expect(ArmisHarness.SW_OK, h.putPlayerId(PLAYER_ID), "put player id");
         ArmisHarness.ok(h.apdu(SELECT));
         return h;
     }
 
-    static void lifecycle() throws Exception {
-        ArmisHarness h = personalized("Mari-Liis");
-        ArmisHarness.expect("Mari-Liis", new String(ArmisHarness.ok(h.apdu("8030000000")), "UTF-8"), "player name");
+    static void install() throws Exception {
+        Frame f = cmd(installed(), 0x20, 0);
+        ArmisHarness.expect(1, f.state, "new game after install");
     }
 
     /** Frame: state, score, hi, len, then 2-bit cells. */
@@ -137,7 +125,7 @@ public class ArmisSnakeTest {
     }
 
     static void game() throws Exception {
-        ArmisHarness h = personalized("p");
+        ArmisHarness h = installed();
         Frame f = cmd(h, 0x20, 0);
         ArmisHarness.expect(1, f.state, "state");
         ArmisHarness.expect(3, f.len, "length");
@@ -161,40 +149,16 @@ public class ArmisSnakeTest {
         ArmisHarness.expect(0, g.score, "score reset");
     }
 
-    static void signedScore() throws Exception {
-        ArmisHarness h = personalized("p");
-        ArmisHarness.expect(0, h.verifiedScore(), "initial high score");
-        Frame f = playToEnd(h);
-        ArmisHarness.SignedScore s = new ArmisHarness.SignedScore(ArmisHarness.ok(h.signScore(NONCE)));
-        ArmisHarness.expect(Arrays.toString(PLAYER_ID), Arrays.toString(s.playerId), "player id");
-        ArmisHarness.expect(f.hi, s.score, "signed high score");
-        ArmisHarness.expect(true, s.verify(h.managerKey, NONCE), "signature");
-    }
-
-    static void signedScoreTampering() throws Exception {
-        ArmisHarness h = personalized("p");
-        byte[] response = ArmisHarness.ok(h.signScore(NONCE));
-        response[17] ^= 0x10;  // score + 16
-        ArmisHarness.expect(false, new ArmisHarness.SignedScore(response).verify(h.managerKey, NONCE), "tampered score");
-        response[17] ^= 0x10;
-        response[0] ^= 1;
-        ArmisHarness.expect(false, new ArmisHarness.SignedScore(response).verify(h.managerKey, NONCE), "tampered id");
-        response[0] ^= 1;
-        byte[] other = NONCE.clone();
-        other[0] ^= 1;
-        ArmisHarness.expect(false, new ArmisHarness.SignedScore(response).verify(h.managerKey, other), "other nonce");
-        // jCardSim generates the same key pair on every simulated card, so take another key from the JDK
-        ECPublicKey otherCard = (ECPublicKey) ArmisHarness.generate().getPublic();
-        ArmisHarness.expect(false, new ArmisHarness.SignedScore(response).verify(otherCard, NONCE), "other card");
-    }
-
-    static void signScoreRefusals() throws Exception {
-        ArmisHarness h = new ArmisHarness();
-        h.deploy();
+    static void highScorePersists() throws Exception {
+        ArmisHarness h = installed();
+        Frame end = playToEnd(h);
+        // Selecting another applet clears the game; the high score is in EEPROM
+        ArmisHarness.ok(h.apdu(SELECT_MANAGER));
         ArmisHarness.ok(h.apdu(SELECT));
-        ArmisHarness.expect(SW_CONDITIONS, ArmisHarness.sw(h.signScore(NONCE)), "sign without player id");
-        ArmisHarness g = personalized("p");
-        ArmisHarness.expect(SW_WRONG_LENGTH, ArmisHarness.sw(g.signScore(new byte[16])), "16-byte nonce");
+        Frame f = cmd(h, 0x10, 0);
+        ArmisHarness.expect(1, f.state, "a fresh game after reselection");
+        ArmisHarness.expect(3, f.len, "fresh length");
+        ArmisHarness.expect(end.hi, f.hi, "high score after reselection");
     }
 
     static void wrongIssuerKey() throws Exception {
@@ -205,42 +169,17 @@ public class ArmisSnakeTest {
         ArmisHarness.expect(ArmisHarness.SW_OK, h.finalizeInstall(h.issuer), "finalize with issuer key");
     }
 
-    static void wrongAuthSigner() throws Exception {
+    static void noPersonalization() throws Exception {
         ArmisHarness h = new ArmisHarness();
         h.deploy();
-        ArmisHarness.expect(SW_SECURITY, h.authenticate(ArmisHarness.generate()), "authenticate with other key");
-        h.sessionKey = new byte[32];  // attacker's guess
-        ArmisHarness.expect(SW_SECURITY, h.putName("x"), "put name after failed auth");
-    }
-
-    static void noSession() throws Exception {
-        ArmisHarness h = new ArmisHarness();
-        h.deploy();
-        h.sessionKey = new byte[32];
-        ArmisHarness.expect(SW_SECURITY, h.putName("x"), "put name without session");
-    }
-
-    static void selectEndsSession() throws Exception {
-        ArmisHarness h = new ArmisHarness();
-        h.deploy();
-        ArmisHarness.expect(ArmisHarness.SW_OK, h.authenticate(h.issuer), "authenticate");
-        ArmisHarness.ok(h.apdu(SELECT));
-        ArmisHarness.expect(SW_SECURITY, h.putName("x"), "put name after select");
-    }
-
-    static void longName() throws Exception {
-        ArmisHarness h = personalized("sixteen-bytes-ok");
-        ArmisHarness.expect(ArmisHarness.SW_OK, h.authenticate(h.issuer), "session");
-        ArmisHarness.expect(SW_WRONG_LENGTH, h.putName("seventeen-bytes-x"), "17-byte name");
-        ArmisHarness.expect("sixteen-bytes-ok", new String(ArmisHarness.ok(h.apdu("8030000000")), "UTF-8"),
-                "name unchanged");
+        byte[] command = ArmisHarness.hex("DA5F200141");
+        ArmisHarness.expect(SW_INS, ArmisHarness.sw(h.storeData(ArmisHarness.SNAKE_AID, 0x80, command)), "STORE DATA");
     }
 
     static void unknownCommands() throws Exception {
-        ArmisHarness h = personalized("p");
+        ArmisHarness h = installed();
         ArmisHarness.expect(SW_CLA, ArmisHarness.sw(h.apdu("0010000047")), "CLA 00");
         ArmisHarness.expect(SW_INS, ArmisHarness.sw(h.apdu("8099000000")), "INS 99");
-        // Issuer commands are only reachable through STORE DATA, not as plain APDUs
-        ArmisHarness.expect(SW_INS, ArmisHarness.sw(h.apdu("80DA5F200141")), "PUT DATA as plain APDU");
+        ArmisHarness.expect(SW_INS, ArmisHarness.sw(h.apdu("8030000000")), "INS 30");
     }
 }

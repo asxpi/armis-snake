@@ -13,11 +13,6 @@
         <java.version>17</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <bouncycastle.version>1.86</bouncycastle.version>
-        <payneteasy.version>1.0-11</payneteasy.version>
-        <protobuf.version>4.36.2</protobuf.version>
-        <jcardsim.version>3.0.6.0</jcardsim.version>
-        <armis.dir>${project.basedir}/../ext/armis-applet-ecosystem</armis.dir>
     </properties>
 
     <parent>
@@ -29,29 +24,6 @@
 
     <dependencies>
         <dependency>
-            <groupId>org.bouncycastle</groupId>
-            <artifactId>bcprov-jdk18on</artifactId>
-            <version>${bouncycastle.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.payneteasy</groupId>
-            <artifactId>ber-tlv</artifactId>
-            <version>${payneteasy.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.google.protobuf</groupId>
-            <artifactId>protobuf-java</artifactId>
-            <version>${protobuf.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.github.ben-manes.caffeine</groupId>
-            <artifactId>caffeine</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>jakarta.validation</groupId>
-            <artifactId>jakarta.validation-api</artifactId>
-        </dependency>
-        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <scope>provided</scope>
@@ -62,43 +34,13 @@
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-validation</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- Tests run the applet and the ARMIS Manager in jCardSim -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.bouncycastle</groupId>
-            <artifactId>bcpkix-jdk18on</artifactId>
-            <version>${bouncycastle.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.klinec</groupId>
-            <artifactId>jcardsim</artifactId>
-            <version>${jcardsim.version}</version>
-            <scope>test</scope>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.globalplatform</groupId>
-            <artifactId>gpapi</artifactId>
-            <version>1.6</version>
-            <scope>system</scope>
-            <systemPath>${armis.dir}/ext/gp-exports/org.globalplatform-1.6/gpapi-globalplatform.jar</systemPath>
         </dependency>
     </dependencies>
 
@@ -122,57 +64,6 @@
                 </configuration>
             </plugin>
 
-            <!-- jCardSim rejects getInstance(..., externalAccess=true): test with a patched copy of the ARMIS sources -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-antrun-plugin</artifactId>
-                <version>3.2.0</version>
-                <executions>
-                    <execution>
-                        <phase>generate-test-sources</phase>
-                        <goals><goal>run</goal></goals>
-                        <configuration>
-                            <target>
-                                <copy todir="${project.build.directory}/armis-src">
-                                    <fileset dir="${armis.dir}/util-lib/src/main/java"/>
-                                    <fileset dir="${armis.dir}/manager/src/main/java"/>
-                                </copy>
-                                <replaceregexp match="getInstance\(([^)]*), true\)" replace="getInstance(\1, false)"
-                                               byline="true" encoding="UTF-8">
-                                    <fileset dir="${project.build.directory}/armis-src"/>
-                                </replaceregexp>
-                            </target>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>build-helper-maven-plugin</artifactId>
-                <version>3.6.2</version>
-                <executions>
-                    <execution>
-                        <phase>generate-test-sources</phase>
-                        <goals><goal>add-test-source</goal></goals>
-                        <configuration>
-                            <sources>
-                                <source>${project.basedir}/../src</source>
-                                <source>${project.basedir}/../test</source>
-                                <source>${project.build.directory}/armis-src</source>
-                            </sources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <environmentVariables>
-                        <JCARDSIM_OBJECT_DELETION_SUPPORTED>1</JCARDSIM_OBJECT_DELETION_SUPPORTED>
-                    </environmentVariables>
-                </configuration>
-            </plugin>
 
             <plugin>
                 <groupId>org.springframework.boot</groupId>

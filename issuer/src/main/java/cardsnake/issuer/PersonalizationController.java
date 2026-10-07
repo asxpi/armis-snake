@@ -1,16 +1,12 @@
 package cardsnake.issuer;
 
 import cardsnake.issuer.model.AbortedResponse;
-import cardsnake.issuer.model.ContinueRequest;
-import cardsnake.issuer.model.ContinueResponse;
 import cardsnake.issuer.model.RemovedRequest;
 import cardsnake.issuer.model.StartRequest;
 import cardsnake.issuer.model.StartResponse;
-import cardsnake.issuer.model.StoreDataCommand;
-import cardsnake.issuer.model.StoreDataResponse;
-import cardsnake.issuer.securemessaging.SecureMessagingKeyStore;
 import lombok.NonNull;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -20,8 +16,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.security.cert.X509Certificate;
-import java.util.Optional;
 
+/**
+ * The ARMIS issuer API (issuer-openapi.yml) for an applet that needs no
+ * personalization: every install is allowed, and the issuer sends no commands.
+ */
+@Slf4j
 @RestController
 @RequiredArgsConstructor
 @RequestMapping(
@@ -32,52 +32,22 @@ import java.util.Optional;
 public class PersonalizationController {
 
     @NonNull
-    private final SecureMessagingKeyStore secureMessagingKeyStore;
-    @NonNull
-    private final PersonalizationService personalizationService;
+    private final X509Certificate issuerCertificate;
 
     @PostMapping(path = "start")
-    public ResponseEntity<?> startPersonalization(@RequestBody StartRequest startRequest) {
-        X509Certificate cardHolderCertificate = startRequest.getCardHolderCertificate();
-        Optional<StoreDataCommand> storeDataCommand;
-        try {
-            storeDataCommand = personalizationService.startPersonalization(cardHolderCertificate);
-        } catch (IssuerAbortedPersonalizationException e) {
-            AbortedResponse abortedResponse = new AbortedResponse(e.getReasonCode());
-            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(abortedResponse);
-        }
-
-        // Issuer may choose to use secure messaging inside personalization commands and responses. But in any case,
-        // Issuer REST API requires always returning an issuer certificate, even when secure messaging is not used.
-        X509Certificate issuerCertificate = secureMessagingKeyStore.getIssuerCertificate();
-        StartResponse startResponse = new StartResponse(issuerCertificate, storeDataCommand.orElse(null));
-        return ResponseEntity.ok(startResponse);
+    public StartResponse startPersonalization(@RequestBody StartRequest startRequest) {
+        return new StartResponse(issuerCertificate);
     }
 
+    /** Only follows a command from the issuer, which never sends one; abort if called anyway. */
     @PostMapping(path = "continue")
-    public ResponseEntity<?> continuePersonalization(@RequestBody ContinueRequest continueRequest) {
-        X509Certificate cardHolderCertificate = continueRequest.getCardHolderCertificate();
-        StoreDataResponse storeDataResponse = continueRequest.getStoreDataResponse();
-        Optional<StoreDataCommand> storeDataCommand;
-        try {
-            storeDataCommand = personalizationService.continuePersonalization(cardHolderCertificate, storeDataResponse);
-        } catch (IssuerAbortedPersonalizationException e) {
-            AbortedResponse abortedResponse = new AbortedResponse(e.getReasonCode());
-            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(abortedResponse);
-        }
-        if (storeDataCommand.isEmpty()) {
-            return ResponseEntity.noContent().build();
-        }
-        ContinueResponse continueResponse = new ContinueResponse(storeDataCommand.get());
-        return ResponseEntity.ok(continueResponse);
+    public ResponseEntity<AbortedResponse> continuePersonalization() {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(new AbortedResponse(null));
     }
 
     @PostMapping(path = "removed")
     public ResponseEntity<Void> removedPersonalization(@RequestBody RemovedRequest removedRequest) {
-        personalizationService.removedPersonalization(
-                removedRequest.getCardHolderCertificate(),
-                removedRequest.getEventType());
+        log.info("Applet removed: {}", removedRequest.getEventType());
         return ResponseEntity.noContent().build();
     }
-
 }
