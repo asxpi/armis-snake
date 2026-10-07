@@ -73,6 +73,34 @@ the 16×16 board at 2 bits per cell (0 empty, 1 body, 2 head, 3 food).
 4. Over secure messaging: PUT DATA `5F20` sets the player name, GET DATA `DF01`
    returns the high score.
 
+## Issuer service
+
+[`issuer/`](issuer) is the leaderboard service the ARMIS server calls to
+personalize the applet: it sets the player name from the card holder
+certificate and records the high score read from the card. It is a fork of
+RIA's test issuer service with the same REST API.
+
+## Testing on a real card
+
+Until RIA provides test cards, a blank Java Card 3.0.4+ / GlobalPlatform 2.2.1
+card with P-384 ECDH and ECDSA, AES-256 and object deletion (e.g. NXP JCOP 4
+J3R180) can run the real ARMIS tooling, with keys you control. Untested so far.
+
+1. Get [`armis-cli.jar`](https://github.com/open-eid/armis-cli/releases) (v0.11.0)
+   and its prebuilt ARMIS library and Manager CAPs (`prebuilt/applets/`).
+2. Set up a security domain armis-cli can open (`--armis.sd-aid`, `--armis.sd-key`,
+   `--armis.sd-key-diversification`), e.g. with
+   [GlobalPlatformPro](https://github.com/martinpaljak/GlobalPlatformPro), and an
+   RSA DM key (`--armis.dm-key`).
+3. `--armis.action=deploy-manager` with the library and Manager CAPs.
+4. Start the issuer service (see [issuer/README.md](issuer/README.md)), then
+   `--armis.action=deploy-client --armis.client-cap-file=file:result/armis-snake.cap
+   --armis.client-aid=F0534E414B454101 --armis.client-instance-aid=F0534E414B454101
+   --armis.issuer-url=http://localhost:8080/v1`. Use `sign` first if the card
+   requires DAP.
+5. Play over PC/SC with the applet AID `F0534E414B454101`, then run `deploy-client`
+   again or another personalization to see the score on `GET /v1/leaderboard`.
+
 ## Security and privacy
 
 - No access to eID data: the applet lives in the ARMIS SSD and cannot reach the
@@ -83,6 +111,8 @@ the 16×16 board at 2 bits per cell (0 empty, 1 body, 2 head, 3 food).
 - Selecting the applet ends any issuer session; issuer commands are reachable
   only through STORE DATA, never as plain APDUs.
 - Food placement uses `RandomData.ALG_SECURE_RANDOM`.
+- The issuer service keeps only a hash of the personal code, the given name and
+  the high score, and drops them when ARMIS reports the applet removed.
 - Inherited from the ARMIS library: SM MACs are not computed yet (zero bytes,
   marked TODO upstream), so SM gives confidentiality but not integrity.
 

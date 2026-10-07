@@ -1,0 +1,251 @@
+openapi: 3.0.3
+info:
+  title: ARMIS Applet Issuer Endpoint
+  version: 1.0.1
+  description: |
+    This is a service to manage lifecycle of one applet, that users may install on ID-cards, digital-ID-s, residence permit cards and e-resident digi-ID-s. Each different applet should have a different endpoint.
+
+    From the service perspective the applet has 3 lifecycle states:
+    - INSTALLED - The applet package has been loaded and installed on the card.
+    - PERSONALIZED - The applet has been personalized and is ready for use.
+    - (REMOVED) - The applet has been removed from the card.
+
+    This API (and ARMIS server) does not enforce the content of StoreDataCommand.data and StoreDataResponse.data, it is up to issuer service and applet to implement a suitable communication between themselves. A secure messaging channel is provided as an example.
+
+    ARMIS server does not issue multiple HTTP requests (/personalization/start, /personalization/continue, /personalization/removed) with the same cardHolderCertificate to the same issuer in parallel, requests with the same cardHolderCertificate are performed sequentially (previous HTTP request with the same cardHolderCertificate is completed before new HTTP request with the same cardHolderCertificate is started). HTTP keep-alive connection may be kept open for multiple subsequent requests. ARMIS server may issue requests with different cardHolderCertificate during the same HTTP keep-alive connection.
+#servers:
+#  - url: https://test-applet.example.com/v1
+paths:
+  /personalization/start:
+    post:
+      tags:
+        - personalization
+      summary: Start installation and personalization.
+      description: |
+        User has requested to install the applet. Issuer can choose to allow (200) or forbid (403) installation of the applet.
+
+        ARMIS server performs '/personalization/start' request only when cardHolderCertificate is issued by ARMIS CA, cardHolderCertificate's validFrom is not in the future, cardHolderCertificate's validUntil is not in the past, cardHolderCertificate's OCSP check is good (e.g. ID-card has not been stolen).
+
+        Issuer must take into account that although (cardHolderCertificate's validUntil - currentTime > 0 seconds) was true when ARMIS server started '/personalization/start' request, it may become false during that request or subsequent '/personalization/continue' requests.
+
+        If this request does not complete within 60 seconds, installation is aborted and issuer will be notified with '/personalization/removed' request.
+      operationId: personalizationStart
+      requestBody:
+        description: Contains card holder's certificate that uniquely identifies the user and the card. The same value is used for personalization session's subsequent requests ('/personalization/continue' and '/personalization/removed').
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRequest'
+      responses:
+        '200':
+          description: |
+            Issuer allows installation of the applet.
+
+            Issuer must return it's certificate (that can be used for example to create a secure messaging channel with the applet). Issuer's certificate must always be returned, even when secure messaging is not used. ARMIS server checks that issuer public key's curve parameters are identical to card holder public key's curve parameters, issuerCertificate is issued by the required CA, issuerCertificate's validFrom is not in the future, issuerCertificate's validUntil is not in the past, issuerCertificate's OCSP check is good.
+
+            To personalize the applet, issuer may send the first command to the applet. To skip personalization of the applet (and put it immediately to PERSONALIZED state), issuer may omit any commands.
+
+            If issuer sends any commands, the last command must have last = true.
+
+            If applet processes a command longer than 5 minutes, personalization is aborted, applet will be uninstalled and issuer will be notified with '/personalization/removed' request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartResponse'
+        '403':
+          description: Issuer does not allow installation of the applet or issuer aborts installation of the applet (e.g. because of an error).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AbortedResponse'
+  /personalization/continue:
+    post:
+      tags:
+        - personalization
+      summary: Continue personalization.
+      description: |
+        The applet has been installed and personalization has been started (one or more commands have been previously sent to the applet). Response of the last command is returned to issuer.
+        - If response's statusWord != 0x9000, then personalization is aborted and issuer must acknowledge the abortion by responding with 403. The applet will be uninstalled.
+        - If response's statusWord = 0x9000, then
+          - issuer can choose to abort personalization by responding with 403. The applet will be uninstalled.
+          - if previous command had last = true, then no more commands can be sent and issuer must finish personalization by returning 204.
+          - if previous command had last = false, then issuer must send next command by returning 200.
+
+        If this request does not complete within 60 seconds, personalization is aborted, applet will be uninstalled and issuer will be notified with '/personalization/removed' request.
+
+        If applet processes a command longer than 5 minutes, personalization is aborted, applet will be uninstalled and issuer will be notified with '/personalization/removed' request. The time from the end of previous response to the beginning of this request may also be up to 5 minutes.
+      operationId: personalizationContinue
+      requestBody:
+        description: |
+          Contains card holder's certificate that uniquely identifies the user and the card. The same value is used for all personalization session's requests.
+
+          Contains the response of the last command.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContinueRequest'
+      responses:
+        '200':
+          description: Issuer sends next command to the applet. Issuer may send a maximum of 256 commands. The last command must have last = true.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContinueResponse'
+        '204':
+          description: Issuer successfully finishes personalization of the applet. The applet will be put to PERSONALIZED state.
+        '403':
+          description: Issuer does not allow installation of the applet or issuer aborts installation of the applet (e.g. because of an error). The applet will be uninstalled. Issuer will not be notified of uninstallation ('/personalization/removed' will not be invoked).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AbortedResponse'
+  /personalization/removed:
+    post:
+      tags:
+        - personalization
+      summary: Notify of uninstallation.
+      description: |
+        The applet has been uninstalled from the card, either because user requested to uninstall the applet or user requested to install the applet, but an error occurred during installation or personalization of the applet. This notification will not be invoked if the issuer itself signalled the abortion of personalization (by returning 403).
+
+        If personalization has been aborted and ARMIS server is supposed to notifiy issuer by invoking this request, but user starts a new attempt of installing the applet, then pending '/personalization/removed' request is permanently cancelled before a new '/personalization/start' request is issued.
+      operationId: personalizationRemoved
+      requestBody:
+        description: Contains card holder's certificate that uniquely identifies the user and the card. The same value is used for all personalization session's requests.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemovedRequest'
+      responses:
+        '204':
+          description: Issuer acknowledges that the applet has been uninstalled. Until issuer has not successfully acknowledged, ARMIS server will repeat this notification.
+components:
+  schemas:
+    StartRequest:
+      type: object
+      required:
+        - cardHolderCertificate
+      properties:
+        cardHolderCertificate:
+          $ref: '#/components/schemas/CardHolderCertificate'
+    StartResponse:
+      type: object
+      required:
+        - issuerCertificate
+      properties:
+        issuerCertificate:
+          $ref: '#/components/schemas/IssuerCertificate'
+        storeDataCommand:
+          $ref: '#/components/schemas/StoreDataCommand'
+    AbortedResponse:
+      type: object
+      properties:
+        reasonCode:
+          description: If issuer knows the reason why applet installation is not allowed or why an error might have occurred, it may include a reasonCode which can provide more information to the user. Some common reasonCode values may be defined in range [1..99], but other reasonCode values in range [100..999] may be issuer specific and DigiDoc4 Client could display something like "Installation not allowed or installation failed, application issuer's error code is 103. Please see [link to issuer's site] for more information.".
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 999
+          example: 103
+    ContinueRequest:
+      type: object
+      required:
+        - cardHolderCertificate
+        - storeDataResponse
+      properties:
+        cardHolderCertificate:
+          $ref: '#/components/schemas/CardHolderCertificate'
+        storeDataResponse:
+          $ref: '#/components/schemas/StoreDataResponse'
+    ContinueResponse:
+      type: object
+      required:
+        - storeDataCommand
+      properties:
+        storeDataCommand:
+          $ref: '#/components/schemas/StoreDataCommand'
+    RemovedRequest:
+      type: object
+      required:
+        - cardHolderCertificate
+        - eventType
+      properties:
+        cardHolderCertificate:
+          $ref: '#/components/schemas/CardHolderCertificate'
+        eventType:
+          $ref: '#/components/schemas/PersonalizationRemovedEventType'
+    StoreDataCommand:
+      description: Command that is sent to the applet (command APDU that conforms to Global Platform STORE DATA command).
+      type: object
+      required:
+        - last
+        - responseExpected
+        - data
+      properties:
+        last:
+          description: Flag if this command is the last personalization command.
+          type: boolean
+          example: false
+        responseExpected:
+          description: Flag if applet will include more than 0 bytes of response data.
+          type: boolean
+          example: true
+        data:
+          description: Data bytes in the command APDU body, encoded into Base64. Binary value length must be [0..239] bytes.
+          type: string
+          format: byte
+          minLength: 0
+          maxLength: 239
+          example: iAAAzjCBywRhBC8eB8d2v0C1ruwr+3EWEg6CcgPyKYB8bOiB1cpxIpcCGt/5qWOac7AsNtz+K2hES8EHsTZSJ98uKskKF/aFk0SlARBjk8gq1+jKXGcDsg9SZGGGpv18ecYoxgAaVYJWaTBmAjEAxY34npoZiqgpUNgn6qDzAd3d79s/SIOtKVEwqKx/ztSy7HpFRcXm6JvfmDxvO4PSAjEAofODHcy6F4S7AeFzzSBe8w+eiq84Zx+Aq3Dg/Wzt+4ODJh8T5DtFb5T3Wp3T6gXT
+    StoreDataResponse:
+      description: Response that is returned from the applet (response APDU that conforms to Global Platform STORE DATA response).
+      type: object
+      required:
+        - statusWord
+        - data
+      properties:
+        statusWord:
+          description: The value of the response APDU status bytes SW1 and SW2 as a single status word SW. 16-bit unsigned integer.
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          example: 36864
+        data:
+          description: Data bytes in the response APDU body, encoded into Base64. If statusWord = 0x9000 and previous responseExpected = true, binary value length is [1..239] bytes, otherwise value length is 0 bytes.
+          type: string
+          format: byte
+          minLength: 0
+          maxLength: 239
+          example: MIHKBGEEDPmYVDBJnaDyp85zQcIxhVWnwnWX6UaKFQVsGgsSGC8L0t43PWidadWXZGsT0ULcky3yfIVcZi/9Le6HRP5MbrZlEL86mgHBENymhrBFt31KwGb0kQqrRrKVhiAO8HSpMGUCMDlPdFXUhgW1+ekYA3tv12+nLp5pB/36iyB6PXiW8AoxxuDflwH66t3pkWTVCtQFGQIxAJ6NjWVSrCvlo/q3gwe9NLcObQkguQHKj1SVLQeMdKJJC3qW4DJtu53sycolaFBXZw==
+    CardHolderCertificate:
+      description: |
+        Card holder's certificate that uniquely identifies the user and the card. X.509 certificate in DER format, encoded into Base64.
+        Contains:
+        - Card holder's personal code (e.g. PNOEE-38001085718).
+        - Document number (e.g. NS0010071).
+        - Document type (ID-card / digital-ID / residence permit card / e-resident digi-ID). Although this can currently be derived from document number, issuer should not duplicate derivation logic themselves and this logic may change in the future.
+      type: string
+      format: byte
+      minLength: 1
+      example: MIICdzCCAh6gAwIBAgIUQK8VpO5T/79komlzbnKC/NnM8YIwCgYIKoZIzj0EAwQwWzEYMBYGA1UEAwwPREVWIG9mIEFSTUlTLUNBMRcwFQYDVQRhDA5OVFJFRS0xMjM0NTY3ODEZMBcGA1UECgwQQUNNRSBDb3Jwb3JhdGlvbjELMAkGA1UEBhMCRUUwHhcNMjAxMTAxMTk1NjE4WhcNMjAxMjAxMTk1NjE4WjB/MQswCQYDVQQGEwJFRTEqMCgGA1UEAwwhSsOVRU9SRyxKQUFLLUtSSVNUSkFOLDM4MDAxMDg1NzE4MRAwDgYDVQQEDAdKw5VFT1JHMRYwFAYDVQQqDA1KQUFLLUtSSVNUSkFOMRowGAYDVQQFExFQTk9FRS0zODAwMTA4NTcxODB2MBAGByqGSM49AgEGBSuBBAAiA2IABJu2FYhMYfMky+CWhvK1qCULPgNqoXefcR71I/EVT6gMKbqmauQp+boM1tEhYDKiH1YC6uhd68HilI8MdfrLHjXYBeYEgvpIQhlNQELPc+HIowy4foOKjjwwJosEOxiWhaN/MH0wCQYDVR0TBAIwADBLBggrBgEFBQcBAQQ/MD0wOwYIKwYBBQUHMAGGL2h0dHA6Ly9sb2NhbGhvc3Q6ODAvZWpiY2EvcHVibGljd2ViL3N0YXR1cy9vY3NwMBMGA1UdJQQMMAoGCCsGAQUFBwMCMA4GA1UdDwEB/wQEAwIDiDAKBggqhkjOPQQDBANHADBEAiBD5jzAftNpHz8BlxP9/ZSYWBfIP/V0qDuJYI1twKr7eAIgLcf7TnmRpg8LwlB9l6ryZ4oeN3aw0yPeeSTASWnYpg4=
+    IssuerCertificate:
+      description: Issuer's certificate. X.509 certificate in DER format, encoded into Base64.
+      type: string
+      format: byte
+      minLength: 1
+      example: MIICfTCCAgSgAwIBAgIEX5vNJDAKBggqhkjOPQQDBDBNMQswCQYDVQQGEwJFRTElMCMGA1UECgwcVGVzdCBJc3N1ZXIgQ29ycG9yYXRpb24gSW5jLjEXMBUGA1UEAwwOSVNTVUVSLVNFUlZJQ0UwHhcNMjAxMDI5MjIwMDAwWhcNMzAxMDI5MjIwMDAwWjBNMQswCQYDVQQGEwJFRTElMCMGA1UECgwcVGVzdCBJc3N1ZXIgQ29ycG9yYXRpb24gSW5jLjEXMBUGA1UEAwwOSVNTVUVSLVNFUlZJQ0UwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQwze6dgcbMBNm2GS3x3A2fowd02I+X/ZaGLtD6NrHtmQHnZkncpQlOwDz0NHg//4nL86aUd4rwidE1hOABVKbk/wJLpStbiRGLdgQB9SBpPwAGBzjgH16gsr+h9LlRhHqjgbQwgbEwCQYDVR0TBAIwADB4BgNVHSMEcTBvgBQrwZvIdn4iBMyYJKsTe3kDXOx2e6FRpE8wTTELMAkGA1UEBhMCRUUxJTAjBgNVBAoMHFRlc3QgSXNzdWVyIENvcnBvcmF0aW9uIEluYy4xFzAVBgNVBAMMDklTU1VFUi1TRVJWSUNFggRfm80kMB0GA1UdDgQWBBQrwZvIdn4iBMyYJKsTe3kDXOx2ezALBgNVHQ8EBAMCA4gwCgYIKoZIzj0EAwQDZwAwZAIwDlVIbLMe8UroFrEb3/KTLLhwGMo94Nsu9PPUwbnk5OsgGYrIInGZSZrtr/YMKOcsAjAH0CrEUYuljbhudIBr8ys+Gc+RlboVdA22vB9YyfxWFHQ9uFN8ams36gWZwsI5470=
+    PersonalizationRemovedEventType:
+      type: string
+      enum:
+        - UNINSTALLED_BY_USER
+        - STORE_DATA_CHAIN_COMPLETED_BUT_ISSUER_TRIED_TO_CONTINUE
+        - STORE_DATA_CHAIN_NOT_COMPLETED_BY_ISSUER
+        - INVALID_RESPONSE_BY_ISSUER
+        - REQUEST_TIMEOUT_BY_ISSUER
+        - APPLET_INSTALL_ERROR
+        - CARD_HOLDER_COMMUNICATION_ERROR
+        - UNSPECIFIED_ERROR
+      example: UNINSTALLED_BY_USER

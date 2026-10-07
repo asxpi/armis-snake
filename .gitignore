@@ -2,3 +2,6 @@ build/
 lib/
 result
 result-*
+issuer/target/
+*.p12
+*.pem

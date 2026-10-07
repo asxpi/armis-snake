@@ -36,9 +36,16 @@
         '';
       };
 
-      devShells.x86_64-linux.default = pkgs.mkShell {
-        packages = [ jdk pkgs.ant ];
-        JAVA_HOME = jdk.home;
+      devShells.x86_64-linux = {
+        default = pkgs.mkShell {
+          packages = [ jdk pkgs.ant ];
+          JAVA_HOME = jdk.home;
+        };
+        # Issuer service: Spring Boot 3 needs JDK 17
+        issuer = pkgs.mkShell {
+          packages = [ pkgs.jdk17 pkgs.maven ];
+          JAVA_HOME = pkgs.jdk17.home;
+        };
       };
     };
 }
