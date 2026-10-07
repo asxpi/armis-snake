@@ -120,6 +120,9 @@ public class ArmisSnakeTest {
             }
             int eaten = f.score;
             f = cmd(h, 0x10, dir);
+            // The board stores the snake as directions the tail follows; it must stay whole
+            ArmisHarness.expect((long) f.len, f.count(1) + f.count(2), "snake cells after a move");
+            ArmisHarness.expect(1L, f.count(2), "one head");
             if (f.state == 1 && f.score > eaten) {
                 ArmisHarness.expect(3 + f.score / 10, f.len, "length after eating");
             }

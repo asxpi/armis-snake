@@ -11,6 +11,7 @@ import javacard.framework.JCSystem;
 import javacard.framework.Util;
 import javacard.security.AESKey;
 import javacard.security.KeyBuilder;
+import javacard.security.MessageDigest;
 import javacard.security.Signature;
 import javacardx.crypto.Cipher;
 
@@ -45,8 +46,7 @@ public class ArmisSnake extends AbstractApplet {
         'a', 'r', 'm', 'i', 's', '-', 's', 'n', 'a', 'k', 'e', ' ', 's', 'c', 'o', 'r', 'e'
     };
 
-    private static final short AES_KEY_BYTES = (short) (KeyBuilder.LENGTH_AES_256 / 8);
-    private static final short EC_SECRET_MAX = (short) (KeyBuilder.LENGTH_EC_FP_384 / 8);
+    private static final byte[] KDF_COUNTER = {0, 0, 0, 1};
 
     private final SnakeGame game;
     private final byte[] playerName;
@@ -58,7 +58,6 @@ public class ArmisSnake extends AbstractApplet {
     // through the security domain while this applet is not selected.
     private final AESKey sessionKey;
     private final boolean[] authenticated;
-    private final byte[] kdfBuffer;
     private final Cipher smCipher;
     private final Signature ecdsa;
 
@@ -82,7 +81,6 @@ public class ArmisSnake extends AbstractApplet {
         playerId = new byte[PLAYER_ID_LENGTH];
         sessionKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES_TRANSIENT_RESET, KeyBuilder.LENGTH_AES_256, false);
         authenticated = JCSystem.makeTransientBooleanArray((short) 1, JCSystem.CLEAR_ON_RESET);
-        kdfBuffer = JCSystem.makeTransientByteArray((short) (EC_SECRET_MAX + AES_KEY_BYTES), JCSystem.CLEAR_ON_RESET);
         smCipher = Cipher.getInstance(Cipher.ALG_AES_CBC_ISO9797_M2, false);
         ecdsa = Signature.getInstance(Signature.ALG_ECDSA_SHA_384, false);
     }
@@ -217,17 +215,22 @@ public class ArmisSnake extends AbstractApplet {
         }
 
         ECDHE ecdhe = getEcPrivateKeyService().performEcdhe(in, off, len);
-        // The secret crosses the firewall from the Manager, so it goes through a global array
+        // The secret crosses the firewall from the Manager, so it arrives in a
+        // temporary global array, followed by room for the derived key.
         short secretLength = ecdhe.getSecret(null, SHORT_0);
-        byte[] secret = (byte[]) JCSystem.makeGlobalArray(JCSystem.ARRAY_TYPE_BYTE, secretLength);
-        ecdhe.getSecret(secret, SHORT_0);
-        Util.arrayCopyNonAtomic(secret, SHORT_0, kdfBuffer, SHORT_0, secretLength);
-        Util.arrayFillNonAtomic(secret, SHORT_0, secretLength, (byte) 0);
+        short workLength = (short) (secretLength + MessageDigest.LENGTH_SHA_384);
+        byte[] work = (byte[]) JCSystem.makeGlobalArray(JCSystem.ARRAY_TYPE_BYTE, workLength);
+        ecdhe.getSecret(work, SHORT_0);
 
-        concatKDF.init(kdfBuffer, SHORT_0, secretLength, null, SHORT_0, SHORT_0);
-        concatKDF.generate(kdfBuffer, secretLength, AES_KEY_BYTES);
-        sessionKey.setKey(kdfBuffer, secretLength);
-        Util.arrayFillNonAtomic(kdfBuffer, SHORT_0, (short) kdfBuffer.length, (byte) 0);
+        // ConcatKDF(SHA-384) with no other info; one block covers the 32-byte key:
+        // SHA-384(00000001 || secret). Done here rather than with the library's
+        // ConcatKDF, which keeps its input array in a field, and references to
+        // temporary global arrays must not be stored.
+        digestSha384.reset();
+        digestSha384.update(KDF_COUNTER, SHORT_0, (short) KDF_COUNTER.length);
+        digestSha384.doFinal(work, SHORT_0, secretLength, work, secretLength);
+        sessionKey.setKey(work, secretLength);
+        Util.arrayFillNonAtomic(work, SHORT_0, workLength, (byte) 0);
         short length = ecdhe.getSignedEphemeralPublicKey(out, outOff);
         authenticated[0] = true;
         return length;
