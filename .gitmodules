@@ -1,0 +1,3 @@
+[submodule "ext/armis-applet-ecosystem"]
+	path = ext/armis-applet-ecosystem
+	url = https://github.com/open-eid/armis-applet-ecosystem.git

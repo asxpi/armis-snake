@@ -1,0 +1,337 @@
+import cardsnake.ArmisSnake;
+import com.licel.jcardsim.base.Simulator;
+import com.licel.jcardsim.base.SimulatorRuntime;
+import com.licel.jcardsim.utils.AIDUtil;
+import ee.openeid.armis.applet.ecosystem.ManagerApplet;
+import java.io.ByteArrayOutputStream;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.Signature;
+import java.security.interfaces.ECPublicKey;
+import java.security.spec.ECFieldFp;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECParameterSpec;
+import java.security.spec.ECPoint;
+import java.security.spec.ECPublicKeySpec;
+import java.util.Arrays;
+import javacard.framework.ISOException;
+import javax.crypto.Cipher;
+import javax.crypto.KeyAgreement;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import org.globalplatform.Personalization;
+
+/**
+ * Plays the off-card ARMIS roles against jCardSim: ARMIS (Manager
+ * personalization, install, STORE DATA routing) and the issuer service
+ * (signed ECDHE, secure messaging), following armis-cli and
+ * armis-test-client-issuer-service.
+ *
+ * Differences from a real card: STORE DATA calls processData() directly
+ * instead of going through a GlobalPlatform security domain, and the Manager
+ * certificate is a DER stand-in holding its public key instead of an ARMIS
+ * CA X.509 certificate. SM MACs are zero, as in the ARMIS reference code.
+ */
+public class ArmisHarness {
+    static final byte[] MANAGER_AID = hex("4D616E61676572417070");
+    static final byte[] SNAKE_AID = hex("F0534E414B454101");
+    static final int SW_OK = 0x9000;
+    static final int POINT_LEN = 97, FIELD_LEN = 48;
+
+    /** Exposes installed applets so STORE DATA can reach processData(). */
+    static class Runtime extends SimulatorRuntime {
+        short storeData(byte[] aid, byte[] apdu, int length) {
+            activateSimulatorRuntimeInstance();
+            Personalization app = (Personalization) getApplet(AIDUtil.create(aid));
+            return app.processData(apdu, (short) 0, (short) length, apdu, (short) 0);
+        }
+    }
+
+    final Runtime rt = new Runtime();
+    final Simulator sim = new Simulator(rt);
+    final KeyPair issuer = generate();
+    ECPublicKey managerKey;
+    byte[] sessionKey;
+    int sequence;
+
+    // --- ARMIS ---
+
+    /** armis-cli deploy-manager: install, set curve, generate card key, store certificate. */
+    void deployManager() throws GeneralSecurityException {
+        sim.installApplet(AIDUtil.create(MANAGER_AID), ManagerApplet.class, lv(MANAGER_AID), (short) 0,
+                (byte) (MANAGER_AID.length + 1));
+
+        ECParameterSpec curve = ((ECPublicKey) issuer.getPublic()).getParams();
+        byte[] p = fixed(((ECFieldFp) curve.getCurve().getField()).getP());
+        byte[] a = fixed(curve.getCurve().getA());
+        byte[] b = fixed(curve.getCurve().getB());
+        ok(storeData(MANAGER_AID, 0x00, nested(0xDB, 0x7F, 0x49, concat(tlv(0x81, p), tlv(0x82, a), tlv(0x83, b)))));
+        ok(storeData(MANAGER_AID, 0x00, nested(0xDB, 0x7F, 0x49, concat(tlv(0x84, point(curve.getGenerator())),
+                tlv(0x85, fixed(curve.getOrder())), tlv(0x87, new byte[] {(byte) curve.getCofactor()})))));
+
+        // Response: 7F49 L 86 L <public point>
+        byte[] r = ok(storeData(MANAGER_AID, 0x01, nested(0x47, 0, 0, new byte[0])));
+        byte[] w = Arrays.copyOfRange(r, 5, 5 + (r[4] & 0xFF));
+        managerKey = publicKey(w, curve);
+
+        byte[] cert = tlv(0x30, tlv(0x04, w));
+        ok(storeData(MANAGER_AID, 0x80, nested(0xDB, 0x7F, 0x21, concat(tlv(0x02, new byte[] {0}), tlv(0x04, cert)))));
+    }
+
+    /** armis-cli deploy-client, first half: install with the Manager AID and the issuer key hash. */
+    void install() throws GeneralSecurityException {
+        byte[] hash = MessageDigest.getInstance("SHA-384").digest(issuerPoint(issuer));
+        byte[] params = concat(lv(SNAKE_AID), lv(new byte[] {0}), lv(concat(lv(MANAGER_AID), lv(hash))));
+        sim.installApplet(AIDUtil.create(SNAKE_AID), ArmisSnake.class, params, (short) 0, (byte) params.length);
+    }
+
+    /** Second half: STORE DATA with the issuer public key; returns the SW. */
+    int finalizeInstall(KeyPair key) {
+        return sw(storeData(SNAKE_AID, 0x80, issuerPoint(key)));
+    }
+
+    void deploy() throws GeneralSecurityException {
+        deployManager();
+        install();
+        expect(SW_OK, finalizeInstall(issuer), "finalize install");
+    }
+
+    // --- Issuer service ---
+
+    /**
+     * INTERNAL AUTHENTICATE with an ephemeral key signed by signer. On success,
+     * checks the card's signature with the Manager key and derives the AES-256
+     * session key with ConcatKDF(SHA-384). Returns the SW.
+     */
+    int authenticate(KeyPair signer) throws GeneralSecurityException {
+        KeyPair eph = generate();
+        byte[] ephPoint = point(((ECPublicKey) eph.getPublic()).getW());
+        Signature s = Signature.getInstance("SHA384withECDSA");
+        s.initSign(signer.getPrivate());
+        s.update(ephPoint);
+        byte[] r = storeData(SNAKE_AID, 0x01, nested(0x88, 0, 0, tlv(0x30, concat(tlv(0x04, ephPoint), s.sign()))));
+        if (sw(r) != SW_OK) {
+            return sw(r);
+        }
+
+        // SEQUENCE { OCTET STRING card ephemeral point, SEQUENCE signature }
+        Tlv seq = Tlv.parse(r, 0);
+        Tlv cardPoint = Tlv.parse(seq.value, 0);
+        Signature v = Signature.getInstance("SHA384withECDSA");
+        v.initVerify(managerKey);
+        v.update(cardPoint.value);
+        if (!v.verify(Arrays.copyOfRange(seq.value, cardPoint.end, seq.value.length))) {
+            throw new AssertionError("card ephemeral key signature invalid");
+        }
+
+        KeyAgreement ka = KeyAgreement.getInstance("ECDH");
+        ka.init(eph.getPrivate());
+        ka.doPhase(publicKey(cardPoint.value, managerKey.getParams()), true);
+        MessageDigest sha = MessageDigest.getInstance("SHA-384");
+        sha.update(new byte[] {0, 0, 0, 1});
+        sha.update(ka.generateSecret());
+        sessionKey = Arrays.copyOf(sha.digest(), 32);
+        return SW_OK;
+    }
+
+    /** PUT DATA 5F20 over SM; returns the SW (outer, or the protected one). */
+    int putName(String name) throws GeneralSecurityException {
+        byte[] data = name.getBytes(StandardCharsets.UTF_8);
+        byte[] r = storeData(SNAKE_AID, 0x01, nested(0xDA, 0x5F, 0x20, wrap(0xDA, data, -1)));
+        return sw(r) != SW_OK ? sw(r) : unwrap(r).sw;
+    }
+
+    /** GET DATA DF01 over SM. */
+    int hiScore() throws GeneralSecurityException {
+        Unwrapped u = unwrap(storeData(SNAKE_AID, 0x81, nested(0xCA, 0xDF, 0x01, wrap(0xCA, new byte[0], 0))));
+        expect(SW_OK, u.sw, "protected SW of GET DATA");
+        return ((u.data[0] & 0xFF) << 8) | (u.data[1] & 0xFF);
+    }
+
+    /** ISO 7816-4 SM as in SecureMessagingChannel: AES-CBC, zero IV, ISO 9797-1 M2 padding, zero MAC. */
+    byte[] wrap(int ins, byte[] data, int le) throws GeneralSecurityException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        if (data.length > 0) {
+            byte[] enc = aes(Cipher.ENCRYPT_MODE, pad(data));
+            out.writeBytes((ins & 1) != 0 ? tlv(0x85, enc) : tlv(0x87, concat(new byte[] {1}, enc)));
+        }
+        if (le >= 0) {
+            out.writeBytes(tlv(0x97, BigInteger.valueOf(le).toByteArray()));
+        }
+        out.writeBytes(tlv(0x8E, new byte[8]));
+        return out.toByteArray();
+    }
+
+    static final class Unwrapped {
+        byte[] data = new byte[0];
+        int sw = -1;
+    }
+
+    Unwrapped unwrap(byte[] response) throws GeneralSecurityException {
+        byte[] r = ok(response);
+        Unwrapped u = new Unwrapped();
+        for (int i = 0; i < r.length; ) {
+            Tlv t = Tlv.parse(r, i);
+            if (t.tag == 0x87) {
+                u.data = unpad(aes(Cipher.DECRYPT_MODE, Arrays.copyOfRange(t.value, 1, t.value.length)));
+            } else if (t.tag == 0x85) {
+                u.data = unpad(aes(Cipher.DECRYPT_MODE, t.value));
+            } else if (t.tag == 0x99) {
+                u.sw = ((t.value[0] & 0xFF) << 8) | (t.value[1] & 0xFF);
+            }
+            i = t.end;
+        }
+        return u;
+    }
+
+    byte[] aes(int mode, byte[] data) throws GeneralSecurityException {
+        Cipher c = Cipher.getInstance("AES/CBC/NoPadding");
+        c.init(mode, new SecretKeySpec(sessionKey, "AES"), new IvParameterSpec(new byte[16]));
+        return c.doFinal(data);
+    }
+
+    // --- Transport ---
+
+    /** Plain APDU to the card; returns data + SW. */
+    byte[] apdu(String hex) {
+        return sim.transmitCommand(hex(hex));
+    }
+
+    /** GP STORE DATA (80 E2) delivered to the applet's Personalization.processData(); returns data + SW. */
+    byte[] storeData(byte[] aid, int p1, byte[] data) {
+        byte[] apdu = new byte[261];
+        byte[] header = {(byte) 0x80, (byte) 0xE2, (byte) p1, (byte) sequence++, (byte) data.length};
+        System.arraycopy(header, 0, apdu, 0, 5);
+        System.arraycopy(data, 0, apdu, 5, data.length);
+        try {
+            short n = rt.storeData(aid, apdu, 5 + data.length);
+            return concat(Arrays.copyOf(apdu, n), new byte[] {(byte) 0x90, 0});
+        } catch (ISOException e) {
+            short sw = e.getReason();
+            return new byte[] {(byte) (sw >> 8), (byte) sw};
+        }
+    }
+
+    static int sw(byte[] r) {
+        return ((r[r.length - 2] & 0xFF) << 8) | (r[r.length - 1] & 0xFF);
+    }
+
+    static byte[] ok(byte[] r) {
+        expect(SW_OK, sw(r), "SW");
+        return Arrays.copyOf(r, r.length - 2);
+    }
+
+    static void expect(Object want, Object got, String what) {
+        if (!want.equals(got)) {
+            String fmt = want instanceof Integer && (Integer) want > 0xFF ? "%04X" : "%s";
+            throw new AssertionError(what + ": expected " + String.format(fmt, want) + ", got " + String.format(fmt, got));
+        }
+    }
+
+    static byte[] nested(int ins, int p1, int p2, byte[] data) {
+        return concat(new byte[] {(byte) ins, (byte) p1, (byte) p2, (byte) data.length}, data);
+    }
+
+    // --- Encoding helpers ---
+
+    static final class Tlv {
+        int tag, end;
+        byte[] value;
+
+        static Tlv parse(byte[] b, int i) {
+            Tlv t = new Tlv();
+            t.tag = b[i++] & 0xFF;
+            int len = b[i++] & 0xFF;
+            if (len > 0x80) {
+                int n = len & 0x7F;
+                len = 0;
+                while (n-- > 0) {
+                    len = (len << 8) | (b[i++] & 0xFF);
+                }
+            }
+            t.value = Arrays.copyOfRange(b, i, i + len);
+            t.end = i + len;
+            return t;
+        }
+    }
+
+    static byte[] tlv(int tag, byte[] value) {
+        int n = value.length;
+        byte[] len = n < 0x80 ? new byte[] {(byte) n}
+                : n < 0x100 ? new byte[] {(byte) 0x81, (byte) n}
+                : new byte[] {(byte) 0x82, (byte) (n >> 8), (byte) n};
+        return concat(new byte[] {(byte) tag}, len, value);
+    }
+
+    static byte[] lv(byte[] value) {
+        return concat(new byte[] {(byte) value.length}, value);
+    }
+
+    static byte[] pad(byte[] data) {
+        byte[] p = Arrays.copyOf(data, (data.length / 16 + 1) * 16);
+        p[data.length] = (byte) 0x80;
+        return p;
+    }
+
+    static byte[] unpad(byte[] data) {
+        int i = data.length - 1;
+        while (data[i] == 0) {
+            i--;
+        }
+        return Arrays.copyOf(data, i);
+    }
+
+    static KeyPair generate() {
+        try {
+            KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
+            g.initialize(new ECGenParameterSpec("secp384r1"));
+            return g.generateKeyPair();
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    static byte[] issuerPoint(KeyPair key) {
+        return point(((ECPublicKey) key.getPublic()).getW());
+    }
+
+    static ECPublicKey publicKey(byte[] point, ECParameterSpec curve) throws GeneralSecurityException {
+        ECPoint w = new ECPoint(new BigInteger(1, Arrays.copyOfRange(point, 1, 1 + FIELD_LEN)),
+                new BigInteger(1, Arrays.copyOfRange(point, 1 + FIELD_LEN, POINT_LEN)));
+        return (ECPublicKey) KeyFactory.getInstance("EC").generatePublic(new ECPublicKeySpec(w, curve));
+    }
+
+    static byte[] point(ECPoint w) {
+        return concat(new byte[] {4}, fixed(w.getAffineX()), fixed(w.getAffineY()));
+    }
+
+    static byte[] fixed(BigInteger v) {
+        byte[] b = v.toByteArray();
+        byte[] out = new byte[FIELD_LEN];
+        int n = Math.min(b.length, FIELD_LEN);
+        System.arraycopy(b, b.length - n, out, FIELD_LEN - n, n);
+        return out;
+    }
+
+    static byte[] concat(byte[]... parts) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (byte[] p : parts) {
+            out.writeBytes(p);
+        }
+        return out.toByteArray();
+    }
+
+    static byte[] hex(String s) {
+        s = s.replace(" ", "");
+        byte[] b = new byte[s.length() / 2];
+        for (int i = 0; i < b.length; i++) {
+            b[i] = (byte) Integer.parseInt(s.substring(2 * i, 2 * i + 2), 16);
+        }
+        return b;
+    }
+}

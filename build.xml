@@ -1,0 +1,88 @@
+<project name="armis-snake" default="cap" xmlns:unless="ant:unless">
+  <property name="armis" location="ext/armis-applet-ecosystem"/>
+  <property name="jc.sdk" location="${armis}/ext/sdks/jc304_kit"/>
+  <property name="gp.api" location="${armis}/ext/gp-exports/org.globalplatform-1.6"/>
+
+  <!-- Pinned tools, verified by SHA-256. Nix passes store paths via -Dant-javacard.jar / -Djcardsim.jar. -->
+  <property name="ant-javacard.url" value="https://github.com/martinpaljak/ant-javacard/releases/download/v26.05.15/ant-javacard.jar"/>
+  <property name="ant-javacard.sha256" value="14f5e25c07b184e4ec02ee148892c2ea7ad5d7e9db8b91109524df8f7d000589"/>
+  <property name="ant-javacard.jar" location="lib/ant-javacard.jar"/>
+  <property name="jcardsim.url" value="https://repo1.maven.org/maven2/com/klinec/jcardsim/3.0.6.0/jcardsim-3.0.6.0.jar"/>
+  <property name="jcardsim.sha256" value="db6de7ffde71651c45d00df7e160771685cec3e14e444bf36b796658d289942f"/>
+  <property name="jcardsim.jar" location="lib/jcardsim.jar"/>
+
+  <macrodef name="fetch">
+    <attribute name="name"/>
+    <sequential>
+      <available file="${@{name}.jar}" property="@{name}.present"/>
+      <mkdir dir="lib" unless:set="@{name}.present"/>
+      <get src="${@{name}.url}" dest="${@{name}.jar}" unless:set="@{name}.present"/>
+      <checksum file="${@{name}.jar}" algorithm="SHA-256" property="${@{name}.sha256}" verifyproperty="@{name}.ok"/>
+      <fail message="SHA-256 mismatch: ${@{name}.jar}">
+        <condition><isfalse value="${@{name}.ok}"/></condition>
+      </fail>
+    </sequential>
+  </macrodef>
+
+  <target name="tools">
+    <fetch name="ant-javacard"/>
+    <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${ant-javacard.jar}"/>
+    <mkdir dir="build/tools"/>
+    <javac srcdir="tools" destdir="build/tools" includeantruntime="false" encoding="UTF-8" release="11"/>
+  </target>
+
+  <!-- ARMIS ecosystem library from the pinned submodule; the CAP links against its export file -->
+  <target name="armis-lib" depends="tools">
+    <mkdir dir="build/armis-lib"/>
+    <javacard jckit="${jc.sdk}">
+      <cap aid="41524D49532D6C6962" package="ee.openeid.armis.applet.ecosystem.libs"
+           sources="${armis}/util-lib/src/main/java" output="build/armis-lib/armis-ecosystem-lib.cap"
+           export="build/armis-lib">
+        <import exps="${gp.api}/exports" jar="${gp.api}/gpapi-globalplatform.jar"/>
+      </cap>
+    </javacard>
+  </target>
+
+  <target name="cap" depends="armis-lib" description="Build build/armis-snake.cap">
+    <mkdir dir="build/raw"/>
+    <javacard jckit="${jc.sdk}">
+      <cap aid="F0534E414B4541" package="cardsnake" version="1.0" sources="src"
+           output="build/raw/armis-snake.cap">
+        <import exps="build/armis-lib" jar="build/armis-lib/libs.jar"/>
+        <import exps="${gp.api}/exports" jar="${gp.api}/gpapi-globalplatform.jar"/>
+        <applet class="cardsnake.ArmisSnake" aid="F0534E414B454101"/>
+      </cap>
+    </javacard>
+    <java classname="NormalizeCap" classpath="build/tools" fork="true" failonerror="true">
+      <jvmarg value="-Duser.timezone=UTC"/>  <!-- zip DOS times are local time -->
+      <arg file="build/raw/armis-snake.cap"/>
+      <arg file="build/armis-snake.cap"/>
+    </java>
+    <checksum file="build/armis-snake.cap" algorithm="SHA-256" property="cap.sha256"/>
+    <echo message="build/armis-snake.cap SHA-256 ${cap.sha256}"/>
+  </target>
+
+  <!-- jCardSim rejects getInstance(..., externalAccess=true), so tests compile a
+       copy of the ARMIS sources with it set to false. The CAP uses the originals. -->
+  <target name="test" depends="tools" description="Run the lifecycle and game tests in jCardSim">
+    <fetch name="jcardsim"/>
+    <copy todir="build/test-src/armis">
+      <fileset dir="${armis}/util-lib/src/main/java"/>
+      <fileset dir="${armis}/manager/src/main/java"/>
+    </copy>
+    <replaceregexp match="getInstance\(([^)]*), true\)" replace="getInstance(\1, false)" byline="true" encoding="UTF-8">
+      <fileset dir="build/test-src/armis"/>
+    </replaceregexp>
+    <mkdir dir="build/test"/>
+    <javac srcdir="src:test:build/test-src/armis" destdir="build/test" includeantruntime="false" encoding="UTF-8"
+           release="11" debug="true" classpath="${jcardsim.jar}:${gp.api}/gpapi-globalplatform.jar"/>
+    <java classname="ArmisSnakeTest" fork="true" failonerror="true"
+          classpath="build/test:${jcardsim.jar}:${gp.api}/gpapi-globalplatform.jar">
+      <env key="JCARDSIM_OBJECT_DELETION_SUPPORTED" value="1"/>
+    </java>
+  </target>
+
+  <target name="clean">
+    <delete dir="build"/>
+  </target>
+</project>
